@@ -62,7 +62,7 @@ function ApplicationList({ publication }: { publication?: number }) {
   async function decide(item: Application, estado: string) {
     if (inFlight.current) return;
     const motivo = reasons[item.id_postulacion]?.trim();
-    if (estado === "Rechazada" && !motivo) { setError("Indica un motivo para rechazar o cancelar."); return; }
+    if (estado === "Rechazada" && !motivo) { setError("Indica un motivo para rechazar la postulación."); return; }
     inFlight.current = true; setPending(true); setError("");
     try {
       let key: string | undefined;
@@ -81,6 +81,11 @@ function ApplicationList({ publication }: { publication?: number }) {
       if ([401,403,404].includes(response.status)) { clearPrivate(); return; }
       if (!response.ok) {
         if (estado === "Aceptada") { await recover(item.id_postulacion); return; }
+        if (response.status === 409) {
+          await refreshItem(item.id_postulacion);
+          setError("El estado actual de la postulación impide aplicar este cambio.");
+          return;
+        }
         throw new Error();
       }
       const saved: Application = await response.json();
@@ -112,7 +117,7 @@ function ApplicationList({ publication }: { publication?: number }) {
         <p><Link href={`/publicaciones/${item.id_publicacion}`}>Ver publicación</Link></p>
         {(waiting || (item.estado === "Aceptada" && !accepted)) && <Button disabled={pending} onClick={() => void consult(item)}>Consultar estado</Button>}
         {["Pendiente", "Preseleccionada"].includes(item.estado) && <>
-          <label>Motivo<input disabled={pending || waiting} value={reasons[item.id_postulacion] || ""} maxLength={1000} onChange={event => setReasons(previous => ({ ...previous, [item.id_postulacion]: event.target.value }))} /></label>
+          {publication && <label>Motivo<input disabled={pending || waiting} value={reasons[item.id_postulacion] || ""} maxLength={1000} onChange={event => setReasons(previous => ({ ...previous, [item.id_postulacion]: event.target.value }))} /></label>}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
             {publication ? <>
               {item.estado === "Pendiente" && <Button disabled={pending} onClick={() => void decide(item, "Preseleccionada")}>Preseleccionar</Button>}

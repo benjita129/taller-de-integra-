@@ -2,11 +2,12 @@
 import asyncio
 from contextlib import asynccontextmanager
 import os
+from time import monotonic
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.api.routes import router
 from app.infrastructure.repository import PostgresPublications
-from app.infrastructure.clients import HttpNotifications, UnavailableOccupancy
+from app.infrastructure.clients import HttpNotifications, HttpOccupancy
 from app.application.service import Publications
 from app.application.admissions import Admissions
 from app.application.notifications import dispatch
@@ -20,13 +21,21 @@ from backend.service_runtime.http import configure
 async def lifespan(app):
     stopped=asyncio.Event()
     async def deliver():
+        occupancy_cursor=0
+        next_reconciliation=0
         while not stopped.is_set():
             try: await asyncio.to_thread(dispatch,PostgresPublications(),HttpNotifications())
             except Exception: pass  # La outbox persiste hasta poder entregar.
             try: await asyncio.to_thread(cleanup_images,ImageOperations(PostgresPublications()),SupabasePublicationImages())
             except Exception: pass  # El journal conserva las limpiezas para el siguiente intento.
-            try: await asyncio.to_thread(Admissions(Publications(PostgresPublications(),UnavailableOccupancy(),SupabasePublicationImages())).recover)
+            try: await asyncio.to_thread(Admissions(Publications(PostgresPublications(),HttpOccupancy(),SupabasePublicationImages())).recover)
             except Exception: pass  # Cada admisión conserva su clave y etapa hasta completar el recibo.
+            if os.environ.get("CONVIVENCIA_UPSTREAM_URL") and monotonic()>=next_reconciliation:
+                next_reconciliation=monotonic()+5
+                try:
+                    publications=Publications(PostgresPublications(),HttpOccupancy(),SupabasePublicationImages())
+                    occupancy_cursor=await asyncio.to_thread(publications.reconcile_occupancy,occupancy_cursor)
+                except Exception: pass  # El siguiente ciclo vuelve a consultar la proyección durable.
             try: await asyncio.wait_for(stopped.wait(),timeout=1)
             except TimeoutError: pass
     task=asyncio.create_task(deliver())
@@ -37,7 +46,7 @@ async def lifespan(app):
         await task
 
 
-app=FastAPI(title="Roomies Listado/Applications",version="S3R-C03-v1",lifespan=lifespan)
+app=FastAPI(title="Roomies Listado/Applications",version="S3R-C04-v1",lifespan=lifespan)
 configure(app)
 app.include_router(router)
 @app.get("/health")

@@ -69,9 +69,31 @@ class HttpIncorporations:
             raise DependencyUnavailable() from None
 
 
-class UnavailableOccupancy:
+class HttpOccupancy:
+    def snapshot(self,publication_id):
+        key=os.environ.get("ROOMIES_INTERNAL_TOKEN","")
+        if len(key)<32 or not key.isascii():
+            raise DependencyUnavailable()
+        url=service_url("CONVIVENCIA_UPSTREAM_URL",docker_hosts=("convivencia-mensajeria",))
+        try:
+            with httpx.Client(timeout=2,trust_env=False,follow_redirects=False) as client:
+                response=client.get(url+f"/internal/publicaciones/{publication_id}/ocupacion",
+                                    headers={"X-Roomies-Service":key})
+            response.raise_for_status()
+            value=response.json()
+            if not isinstance(value,dict) or set(value)!={"ocupacion","version_ocupacion","finalizada"}:
+                raise ValueError()
+            count,version,finalized=value["ocupacion"],value["version_ocupacion"],value["finalizada"]
+            if (type(count) is not int or not 0<=count<=2147483647
+                    or type(version) is not int or not 0<=version<=9223372036854775807
+                    or type(finalized) is not bool or (finalized and (count!=0 or version==0))):
+                raise ValueError()
+            return value
+        except (ValueError,httpx.HTTPError):
+            raise DependencyUnavailable("La ocupación de Convivencia no está disponible.") from None
+
     def active_members(self,publication_id):
-        raise DependencyUnavailable("Convivencia pertenece a la siguiente etapa.")
+        return self.snapshot(publication_id)["ocupacion"]
 
 
 class HttpOwners:

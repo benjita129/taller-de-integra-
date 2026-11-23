@@ -27,6 +27,7 @@ services:
       - ./backend/services/listado-applications-service/migrations/002_publication_images.sql:/docker-entrypoint-initdb.d/03-publication-images.sql:ro
       - ./backend/services/listado-applications-service/migrations/003_catalogo_cut.up.sql:/docker-entrypoint-initdb.d/04-catalogo-cut.sql:ro
       - ./backend/services/listado-applications-service/migrations/004_acceptance_operations.sql:/docker-entrypoint-initdb.d/05-acceptance.sql:ro
+      - ./backend/services/listado-applications-service/migrations/005_postulation_lifecycle.sql:/docker-entrypoint-initdb.d/06-postulation-lifecycle.sql:ro
     healthcheck:
       test: [CMD-SHELL, "pg_isready -U roomies_local_owner -d roomies_sprint2_disposable"]
       interval: 5s

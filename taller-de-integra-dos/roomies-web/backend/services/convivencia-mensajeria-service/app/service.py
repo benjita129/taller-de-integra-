@@ -69,16 +69,29 @@ class Convivencia:
                 if rental is None:
                     rental = c.execute("""INSERT INTO convivencia_mensajeria.arriendo(id_publicacion,cupos_totales,version_capacidad)
                       VALUES(%s,%s,%s) RETURNING *""", (payload["id_publicacion"], reservation["cupos_totales"], payload["version_capacidad"])).fetchone()
-                if rental["version_capacidad"] != payload["version_capacidad"] or rental["cupos_totales"] != reservation["cupos_totales"]:
+                if rental["estado"] == "Finalizado":
+                    raise ServiceError("PUBLICATION_CLOSED", "El arriendo está finalizado.")
+                capacity_version = reservation["version_capacidad"]
+                capacity = reservation["cupos_totales"]
+                if capacity_version < rental["version_capacidad"] or (
+                    capacity_version == rental["version_capacidad"] and capacity != rental["cupos_totales"]
+                ):
                     raise ServiceError("CAPACITY_VERSION_CONFLICT", "La versión de capacidad no coincide.")
                 occupied = c.execute("SELECT count(*) AS total FROM convivencia_mensajeria.pertenencia WHERE id_arriendo=%s AND estado='Activa'", (rental["id_arriendo"],)).fetchone()["total"]
-                if occupied >= rental["cupos_totales"]:
+                if occupied >= capacity:
                     raise ServiceError("NO_CAPACITY", "No quedan cupos disponibles.")
+                if capacity_version > rental["version_capacidad"]:
+                    synchronized = c.execute(
+                        "SELECT convivencia_mensajeria.sincronizar_capacidad(%s,%s,%s) AS actualizada",
+                        (rental["id_arriendo"], capacity, capacity_version),
+                    ).fetchone()
+                    if not synchronized["actualizada"]:
+                        raise ServiceError("CAPACITY_VERSION_CONFLICT", "La versión de capacidad no coincide.")
                 c.execute("""INSERT INTO convivencia_mensajeria.pertenencia(id_arriendo,id_usuario,id_postulacion,id_operacion)
                   VALUES(%s,%s,%s,%s)""", (rental["id_arriendo"], payload["id_usuario"], payload["id_postulacion"], key))
-                version = c.execute("UPDATE convivencia_mensajeria.arriendo SET version_ocupacion=version_ocupacion+1 WHERE id_arriendo=%s RETURNING version_ocupacion", (rental["id_arriendo"],)).fetchone()["version_ocupacion"]
+                occupancy_version = c.execute("UPDATE convivencia_mensajeria.arriendo SET version_ocupacion=version_ocupacion+1 WHERE id_arriendo=%s RETURNING version_ocupacion", (rental["id_arriendo"],)).fetchone()["version_ocupacion"]
                 body = {"id_incorporacion": str(key), "id_arriendo": rental["id_arriendo"], "id_publicacion": payload["id_publicacion"], "id_usuario": payload["id_usuario"], "estado": "Activa", "confirmacion_publicacion": "Pendiente"}
-                self._outbox(c, key, "Confirmar", {**reservation, "confirmacion": {"id_arriendo": rental["id_arriendo"], "ocupacion": occupied + 1, "version_ocupacion": version}})
+                self._outbox(c, key, "Confirmar", {**reservation, "confirmacion": {"id_arriendo": rental["id_arriendo"], "ocupacion": occupied + 1, "version_ocupacion": occupancy_version}})
                 c.execute("UPDATE convivencia_mensajeria.incorporacion SET estado='Terminada',http_status=201,respuesta=%s WHERE id_operacion=%s", (Jsonb(body), key))
                 return 201, body, False
             except ServiceError as error:

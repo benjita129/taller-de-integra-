@@ -14,7 +14,7 @@ from backend.service_runtime.contracts import DependencyUnavailable
 from backend.service_runtime.http import configure
 from backend.service_runtime.security import confirmed_actor
 from backend.service_runtime.reporting_security import verify_report_service
-from app.models import ErrorResponse, Incorporation, Receipt, Rental, ServiceError, unavailable
+from app.models import ErrorResponse, Incorporation, Occupancy, Receipt, Rental, ServiceError, unavailable
 from app.ports import HttpIdentity, HttpPublications
 from app.repository import PostgresRepository
 from app.service import Convivencia
@@ -99,6 +99,10 @@ def create_app(instance=None, run_recovery=True):
     def incorporate(data: Incorporation, idempotency_key: Annotated[UUID, Header()], application_service=Depends(service)):
         status, body, replay = application_service.incorporate(idempotency_key, data.model_dump())
         return JSONResponse(body, status_code=status, headers={"Idempotency-Replayed": str(replay).lower()})
+
+    @application.get("/internal/publicaciones/{id}/ocupacion", dependencies=[Depends(internal_service)], response_model=Occupancy, responses=errors)
+    def occupancy(id: Annotated[int, Path(gt=0, le=9223372036854775807)], application_service=Depends(service)):
+        return application_service.repository.occupancy(id)
 
     @application.get("/api/arriendos/mio", response_model=Rental, responses=errors)
     def mine(identity=Depends(confirmed_actor), application_service=Depends(service)):

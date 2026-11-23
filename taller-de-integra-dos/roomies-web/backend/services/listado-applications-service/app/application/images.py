@@ -69,8 +69,6 @@ def save_publication(service, actor, data, files, publication=None, retained=Non
                         raise RuleViolation("La publicación cambió. Recarga antes de guardar.", 409)
                     if current["tipo"] != data["tipo"]:
                         raise RuleViolation("El tipo original no puede modificarse.", 409)
-                    if current["estado"] == "Activa" and data["cupos_totales"] < current["cupos_totales"]:
-                        raise RuleViolation("La reducción de capacidad requiere confirmar ocupación.", 409)
                     repo.update(publication, data)
                 operations.replace(publication, actor, keep, uploaded)
                 operations.complete(actor, key, publication)

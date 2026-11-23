@@ -20,6 +20,13 @@ export function validatePublicationForm(form: FormData): string | null {
     if (!/^[1-9]\d{0,9}$/.test(text(name)) || Number(text(name)) > 2147483647) return "Selecciona región, comuna y cupos válidos.";
   }
   if (!["si", "no"].includes(text("mascota"))) return "Indica si se aceptan mascotas.";
+  if (form.has("reglas")) {
+    let rules: unknown;
+    try { rules = JSON.parse(text("reglas")); } catch { return "Las reglas no son válidas."; }
+    if (!Array.isArray(rules) || rules.length > 50 || rules.some(rule => typeof rule !== "string" || !rule.trim() || [...rule].length > 1000 || rule.includes("\0"))) {
+      return "Puedes guardar hasta 50 reglas de 1 a 1000 caracteres cada una.";
+    }
+  }
   let retained: unknown = [];
   try { retained = JSON.parse(text("imagenes_conservar") || "[]"); } catch { return "Las imágenes conservadas no son válidas."; }
   if (!Array.isArray(retained) || !retained.every(id => Number.isSafeInteger(id) && id > 0) || new Set(retained).size !== retained.length) return "Las imágenes conservadas no son válidas.";

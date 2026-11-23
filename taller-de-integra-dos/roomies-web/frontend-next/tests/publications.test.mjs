@@ -23,11 +23,7 @@ function validForm() {
     titulo: "Habitación disponible", categoria: "ofrezco", ubicacion: "Temuco centro",
     precio: "150000", tipo: "Arrendador", cupos_totales: "2",
     tipo_vivienda: "habitacion", descripcion: "Descripción de prueba",
-<<<<<<< Updated upstream:taller-de-integra-dos/roomies-web/frontend-next/tests/publications.test.mjs
-    mascota: "no", permitir_comentarios: "false", id_region: "9", id_comuna: "91101",
-=======
-    mascota: "no", permitir_comentarios: "false", id_region: "9", id_comuna: "91",
->>>>>>> Stashed changes:taller de integra dos/roomies-web/frontend-next/tests/publications.test.mjs
+    mascota: "no", permitir_comentarios: "false", id_region: "9", id_comuna: "9101",
   })) form.set(key, value);
   return form;
 }
@@ -98,6 +94,30 @@ test("editar usa identidad HttpOnly, destino fijo y validación completa", async
   assert.deepEqual(await result.json(),{id_publicacion:42,mensaje:"Publicación actualizada"});
 });
 
+test("editar conserva la marca de reglas congeladas y admite omitir reglas en PUT", async () => {
+  const detail = new Request(`${config.origin}/web-api/publicaciones/42`, { headers: { cookie } });
+  const canonical = { id_publicacion: 42, estado: "Cerrada", reglas: ["Sin humo"], reglas_bloqueadas: true };
+  const loaded = await handlePublicationRequest(detail, "edit", "42", config, async () => Response.json(canonical));
+  assert.deepEqual(await loaded.json(), canonical);
+
+  const edit = new Request(detail.url, { method: "PUT", headers: { cookie, Origin: config.origin, "X-Haycupo-CSRF": "1" }, body: validForm() });
+  const saved = await handleSavePublication(edit, config, async (_url, options) => {
+    assert.equal(options.body.has("reglas"), false);
+    return Response.json(canonical);
+  }, "42");
+  assert.equal(saved.status, 200);
+});
+
+test("reglas de edición conservan texto en varias líneas y rechazan datos inválidos", () => {
+  const form = validForm();
+  form.set("reglas", JSON.stringify(["Punto 1\nPunto 2"]));
+  assert.equal(validatePublicationForm(form), null);
+  for (const invalid of ["[]x", JSON.stringify([42]), JSON.stringify(["a".repeat(1001)]), JSON.stringify(Array(51).fill("a"))]) {
+    form.set("reglas", invalid);
+    assert.match(validatePublicationForm(form), /reglas/);
+  }
+});
+
 test("listado propio ignora propietario suministrado, filtra campos y no se almacena", async () => {
   const req=new Request(`${config.origin}/web-api/mis-publicaciones?id_usuario=999`,{headers:{cookie}});
   const result=await handlePublicationRequest(req,"mine",undefined,config,async(url,options)=>{
@@ -125,6 +145,9 @@ test("cierre preserva capacidad y limpia sesión solo ante 401, no ante 403", as
     return Response.json({id_publicacion:42,estado:"Cerrada",cupos_totales:4,cupos_disponibles:0});
   });
   assert.equal((await ok.json()).cupos_totales,4);
+  for (const body of [{ id_publicacion: 42, estado: "Activa" }, { id_publicacion: 43, estado: "Cerrada" }]) {
+    assert.equal((await handlePublicationRequest(req(), "close", "42", config, async () => Response.json(body))).status, 503);
+  }
   for(const status of [401,403,404]) {
     const result=await handlePublicationRequest(req(),"close","42",config,async()=>Response.json({}, {status}));
     assert.equal(result.status,status);

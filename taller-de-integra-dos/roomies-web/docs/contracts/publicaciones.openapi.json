@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Roomies Listado/Applications",
-    "version": "S3R-C02-v1"
+    "version": "S3R-C04-v1"
   },
   "paths": {
     "/api/publicaciones/buscar": {
@@ -776,7 +776,7 @@
                   },
                   "reglas": {
                     "type": "string",
-                    "description": "Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla."
+                    "description": "Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla. Omitir en una edición conserva las vigentes; se congelan en la primera activación."
                   },
                   "permitir_comentarios": {
                     "type": "boolean",
@@ -1117,6 +1117,9 @@
               }
             }
           },
+          "409": {
+            "description": "Capacidad incompatible, reglas congeladas o incorporación en curso."
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1211,7 +1214,7 @@
                   },
                   "reglas": {
                     "type": "string",
-                    "description": "Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla."
+                    "description": "Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla. Omitir en una edición conserva las vigentes; se congelan en la primera activación."
                   },
                   "permitir_comentarios": {
                     "type": "boolean",
@@ -1422,7 +1425,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/Publication"
+                }
               }
             }
           },
@@ -1442,6 +1447,7 @@
     "/api/publicaciones/{id}/cerrar": {
       "patch": {
         "summary": "Close",
+        "description": "Cierra el aviso y cancela sus solicitudes abiertas, conservando las incorporaciones.",
         "operationId": "close_api_publicaciones__id__cerrar_patch",
         "security": [
           {
@@ -1469,6 +1475,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Hay una incorporación en curso. Consulta su resultado antes de cerrar."
           },
           "422": {
             "description": "Validation Error",
@@ -1606,6 +1615,22 @@
               "type": "integer",
               "title": "Id"
             }
+          },
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
           }
         ],
         "requestBody": {
@@ -1733,6 +1758,93 @@
           }
         }
       }
+    },
+    "/api/postulaciones/{id}": {
+      "get": {
+        "summary": "Application Detail",
+        "operationId": "application_detail_api_postulaciones__id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/postulaciones/{id}/retiro": {
+      "post": {
+        "summary": "Withdraw",
+        "description": "Retira una solicitud abierta como su postulante.",
+        "operationId": "withdraw_api_postulaciones__id__retiro_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1767,8 +1879,7 @@
             "enum": [
               "Preseleccionada",
               "Aceptada",
-              "Rechazada",
-              "Cancelada"
+              "Rechazada"
             ],
             "title": "Estado"
           },
@@ -1818,6 +1929,30 @@
             "maximum": 9.223372036854776e+18,
             "minimum": 0.0,
             "title": "Version Ocupacion"
+          },
+          "finalizada": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalizada"
+          },
+          "id_usuario_expulsado": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Usuario Expulsado"
           }
         },
         "additionalProperties": false,
@@ -1977,6 +2112,11 @@
             },
             "type": "array",
             "title": "Reglas"
+          },
+          "reglas_bloqueadas": {
+            "type": "boolean",
+            "title": "Reglas Bloqueadas",
+            "description": "Las reglas quedan fijas en la primera activación."
           }
         },
         "type": "object",
@@ -2001,7 +2141,8 @@
           "fecha_publicacion",
           "id_region",
           "id_comuna",
-          "reglas"
+          "reglas",
+          "reglas_bloqueadas"
         ],
         "title": "Publication"
       },
@@ -2155,6 +2296,11 @@
             "type": "array",
             "title": "Reglas"
           },
+          "reglas_bloqueadas": {
+            "type": "boolean",
+            "title": "Reglas Bloqueadas",
+            "description": "Las reglas quedan fijas en la primera activación."
+          },
           "id_propietario": {
             "anyOf": [
               {
@@ -2190,7 +2336,8 @@
           "fecha_publicacion",
           "id_region",
           "id_comuna",
-          "reglas"
+          "reglas",
+          "reglas_bloqueadas"
         ],
         "title": "PublicationDetail"
       },
@@ -2395,6 +2542,11 @@
             "type": "array",
             "title": "Reglas"
           },
+          "reglas_bloqueadas": {
+            "type": "boolean",
+            "title": "Reglas Bloqueadas",
+            "description": "Las reglas quedan fijas en la primera activación."
+          },
           "mensaje": {
             "type": "string",
             "title": "Mensaje"
@@ -2423,6 +2575,7 @@
           "id_region",
           "id_comuna",
           "reglas",
+          "reglas_bloqueadas",
           "mensaje"
         ],
         "title": "PublicationSaved"
@@ -2484,6 +2637,174 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "ApplicationDetail": {
+        "properties": {
+          "id_postulacion": {
+            "type": "integer",
+            "title": "Id Postulacion"
+          },
+          "id_publicacion": {
+            "type": "integer",
+            "title": "Id Publicacion"
+          },
+          "id_usuario": {
+            "type": "integer",
+            "title": "Id Usuario"
+          },
+          "estado": {
+            "type": "string",
+            "enum": [
+              "Pendiente",
+              "Preseleccionada",
+              "Aceptada",
+              "Rechazada",
+              "Cancelada"
+            ],
+            "title": "Estado"
+          },
+          "motivo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Motivo"
+          },
+          "fecha_postulacion": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fecha Postulacion"
+          },
+          "actualizada_en": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Actualizada En"
+          },
+          "id_arriendo": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Arriendo"
+          },
+          "operacion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdmissionOperation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "incorporacion_pendiente": {
+            "type": "boolean",
+            "title": "Incorporacion Pendiente"
+          },
+          "historial": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationHistoryEntry"
+            },
+            "type": "array",
+            "title": "Historial"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id_postulacion",
+          "id_publicacion",
+          "id_usuario",
+          "estado",
+          "motivo",
+          "fecha_postulacion",
+          "actualizada_en",
+          "id_arriendo",
+          "operacion",
+          "incorporacion_pendiente",
+          "historial"
+        ],
+        "title": "ApplicationDetail"
+      },
+      "ApplicationHistoryEntry": {
+        "properties": {
+          "estado": {
+            "type": "string",
+            "enum": [
+              "Pendiente",
+              "Preseleccionada",
+              "Aceptada",
+              "Rechazada",
+              "Cancelada"
+            ],
+            "title": "Estado"
+          },
+          "motivo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Motivo"
+          },
+          "fecha": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fecha"
+          }
+        },
+        "type": "object",
+        "required": [
+          "estado",
+          "motivo",
+          "fecha"
+        ],
+        "title": "ApplicationHistoryEntry"
+      },
+      "AdmissionOperation": {
+        "properties": {
+          "id_operacion": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id Operacion"
+          },
+          "estado": {
+            "type": "string",
+            "enum": [
+              "Pendiente",
+              "Confirmada",
+              "Rechazada"
+            ],
+            "title": "Estado"
+          },
+          "codigo_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Codigo Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id_operacion",
+          "estado"
+        ],
+        "title": "AdmissionOperation"
       }
     },
     "securitySchemes": {

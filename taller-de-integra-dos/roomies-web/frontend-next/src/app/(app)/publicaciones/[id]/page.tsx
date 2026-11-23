@@ -24,6 +24,7 @@ export default async function PublicationDetail({ params }: { params: Promise<{ 
   }
   const text = (field: string) => typeof publication?.[field] === "string" || typeof publication?.[field] === "number" ? String(publication[field]) : "Por confirmar";
   const images = Array.isArray(publication?.imagenes) ? publication.imagenes.filter(item => item && publicImageURL(item.url)) : [];
+  const rules = Array.isArray(publication?.reglas) ? publication.reglas.filter((rule): rule is string => typeof rule === "string" && Boolean(rule.trim())) : [];
   return <main>
     <PageHeader title="Detalle de publicación" description="Consulta las características y el estado del aviso." />
     <Card>{publication ? <>
@@ -33,7 +34,8 @@ export default async function PublicationDetail({ params }: { params: Promise<{ 
       <p>Cupos disponibles: {text("cupos_disponibles")} · Capacidad total: {text("cupos_totales")}</p>
       <p>Vivienda: {text("tipo_vivienda")} · Mascotas: {text("mascota")}</p>
       <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{text("descripcion")}</p>
-      {config?.provider === "supabase" && publication.tipo === "Arrendador" && publication.estado !== "Cerrada" && <PostulateButton id={Number(id)} />}
+      {rules.length > 0 && <section><h3>Reglas del arriendo</h3><ul>{rules.map((rule, index) => <li key={index} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{rule}</li>)}</ul></section>}
+      {config?.provider === "supabase" && publication.tipo === "Arrendador" && publication.estado !== "Cerrada" && typeof publication.cupos_disponibles === "number" && publication.cupos_disponibles > 0 && <PostulateButton id={Number(id)} />}
       {reportsEnabled(config) && <p><Link href={`/mis-reportes?publicacion=${id}`}>Reportar publicación</Link></p>}
     </> : <p role="alert">No se pudo cargar esta publicación. Vuelve a intentarlo desde Inicio.</p>}</Card>
     <p><Link href="/inicio">Volver a Inicio</Link></p>

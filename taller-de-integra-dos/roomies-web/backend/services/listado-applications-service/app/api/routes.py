@@ -12,22 +12,22 @@ from starlette.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from backend.service_runtime.reporting_security import verify_report_service
-from pydantic import BaseModel,ConfigDict,Field
+from pydantic import BaseModel,ConfigDict,Field,model_validator
 from app.application.service import Publications
 from app.application.admissions import Admissions
 from app.domain.publications import available
 from app.infrastructure.repository import PostgresPublications
-from app.infrastructure.clients import UnavailableOccupancy, HttpOwners
+from app.infrastructure.clients import HttpOccupancy, HttpOwners
 from backend.service_runtime.security import access_token, actor, admin_actor, bearer, confirmed_actor
 from app.infrastructure.storage import SupabasePublicationImages, MAX_IMAGE_BYTES
-from app.api.schemas import Publication, PublicationDetail, PublicationSaved, PublicationPage, Region, Commune, MULTIPART
+from app.api.schemas import ApplicationDetail, Publication, PublicationDetail, PublicationSaved, PublicationPage, Region, Commune, MULTIPART
 from backend.service_runtime.contracts import DependencyUnavailable
 
 router=APIRouter()
 
 
 def service():
-    return Publications(PostgresPublications(),UnavailableOccupancy(),SupabasePublicationImages(),HttpOwners())
+    return Publications(PostgresPublications(),HttpOccupancy(),SupabasePublicationImages(),HttpOwners())
 
 
 def dto(row,occupancy):
@@ -38,7 +38,8 @@ def dto(row,occupancy):
             "cupos_totales":row["cupos_totales"],"cupos":row["cupos_totales"],"cupos_disponibles":slots,
             "tipo_vivienda":row["tipo_vivienda"],"categoria":row["categoria"],"mascota":row["mascota"],
             "permitir_comentarios":row["permitir_comentarios"],"imagen":row.get("imagen"),"fecha_publicacion":row["fecha_publicacion"],
-            "id_region":row.get("id_region"),"id_comuna":row.get("id_comuna"),"reglas":row.get("reglas",[]),"imagenes":row.get("imagenes",[])}
+            "id_region":row.get("id_region"),"id_comuna":row.get("id_comuna"),"reglas":row.get("reglas",[]),
+            "reglas_bloqueadas":row.get("reglas_bloqueadas",row["estado"]=="Activa"),"imagenes":row.get("imagenes",[])}
 
 
 @router.get("/api/publicaciones",response_model=PublicationPage)
@@ -145,6 +146,16 @@ class OccupancyUpdate(BaseModel):
     model_config=ConfigDict(extra="forbid")
     ocupacion:int=Field(strict=True,ge=0,le=2147483647)
     version_ocupacion:int=Field(strict=True,ge=0,le=9223372036854775807)
+    finalizada:bool|None=Field(default=None,strict=True)
+    id_usuario_expulsado:int|None=Field(default=None,strict=True,gt=0,le=9223372036854775807)
+
+    @model_validator(mode="after")
+    def validate_event(self):
+        if self.finalizada and self.ocupacion!=0:
+            raise ValueError("Una finalización exige ocupación cero.")
+        if self.version_ocupacion==0 and (self.finalizada or self.id_usuario_expulsado is not None):
+            raise ValueError("Una finalización o expulsión exige una versión positiva.")
+        return self
 
 
 class ReservationRequest(BaseModel):
@@ -171,9 +182,10 @@ def internal_service(x_roomies_service:str|None=Header(None)):
         raise HTTPException(403,"Servicio no autorizado.")
 
 
-@router.put("/internal/publicaciones/{id}/ocupacion",dependencies=[Depends(internal_service)])
+@router.put("/internal/publicaciones/{id}/ocupacion",dependencies=[Depends(internal_service)],response_model=Publication)
 def occupancy_update(id:int,data:OccupancyUpdate,app=Depends(service)):
-    return dto(app.occupancy_update(id,data.ocupacion,data.version_ocupacion),app.occupancy)
+    return dto(app.occupancy_update(
+        id,data.ocupacion,data.version_ocupacion,data.finalizada,data.id_usuario_expulsado),app.occupancy)
 
 
 @router.post("/internal/publicaciones/{id}/reservas",dependencies=[Depends(internal_service)])
@@ -228,7 +240,8 @@ async def create(request:Request,identity=Depends(confirmed_actor),app=Depends(s
     return {**dto(app.get(id,identity.user_id),app.occupancy),"mensaje":"Publicación creada"}
 
 
-@router.put("/api/publicaciones/{id}",response_model=PublicationSaved,openapi_extra=MULTIPART)
+@router.put("/api/publicaciones/{id}",response_model=PublicationSaved,openapi_extra=MULTIPART,
+            responses={409:{"description":"Capacidad incompatible, reglas congeladas o incorporación en curso."}})
 async def edit(id:int,request:Request,identity=Depends(confirmed_actor),app=Depends(service)):
     previous=app.get(id,identity.user_id)
     data,images,retained=await publication_form(request)
@@ -238,8 +251,10 @@ async def edit(id:int,request:Request,identity=Depends(confirmed_actor),app=Depe
     return {**dto(app.get(id,identity.user_id),app.occupancy),"mensaje":"Publicación actualizada"}
 
 
-@router.patch("/api/publicaciones/{id}/cerrar",response_model=Publication)
+@router.patch("/api/publicaciones/{id}/cerrar",response_model=Publication,
+              responses={409:{"description":"Hay una incorporación en curso. Consulta su resultado antes de cerrar."}})
 def close(id:int,identity=Depends(confirmed_actor),app=Depends(service)):
+    """Cierra el aviso y cancela sus solicitudes abiertas, conservando las incorporaciones."""
     return dto(app.close(identity.user_id,id),app.occupancy)
 
 
@@ -264,6 +279,7 @@ def applicants(id:int,limite:int|None=Query(None,ge=1,le=100),cursor:str|None=Qu
 
 @router.post("/api/postulaciones/{id}/retiro")
 def withdraw(id:int,identity=Depends(confirmed_actor),app=Depends(service)):
+    """Retira una solicitud abierta como su postulante."""
     return app.withdraw(identity.user_id,id)
 
 
@@ -279,7 +295,7 @@ def decide(id:int,data:Decision,idempotency_key:str|None=Header(None),identity=D
     return JSONResponse(jsonable_encoder(result),status_code=status)
 
 
-@router.get("/api/postulaciones/{id}")
+@router.get("/api/postulaciones/{id}",response_model=ApplicationDetail,response_model_exclude_unset=True)
 def application_detail(id:int,identity=Depends(confirmed_actor),app=Depends(service)):
     return Admissions(app).detail(identity.user_id,id)
 

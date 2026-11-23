@@ -17,10 +17,10 @@ python backend/services/run_service.py convivencia --env-file ruta/a/configuraci
 docker build -f backend/services/convivencia-mensajeria-service/Dockerfile -t roomies-convivencia-base .
 ```
 
-El runner valida entorno y DSN propio `CONVIVENCIA_DATABASE_URL`. La migración
-`migrations/001_convivencia_schema.up.sql` requiere un rol migrador y el login
-dedicado `sql_convivencia_mensajeria` sin privilegios heredados. No se aplica al
-arrancar, no usa SQL de otros dominios y no modifica datos existentes.
+El runner valida entorno y DSN propio `CONVIVENCIA_DATABASE_URL`. Antes de
+iniciar el servicio, ejecuta las migraciones pendientes de `migrations/*.up.sql`
+en orden con un rol migrador y el login dedicado
+`sql_convivencia_mensajeria` sin privilegios heredados.
 
 ## Contrato y recuperación
 
@@ -29,8 +29,12 @@ arrancar, no usa SQL de otros dominios y no modifica datos existentes.
   `id_usuario`, `version_capacidad` (enteros positivos).
 - `GET /api/arriendos/mio` y `GET /api/arriendos/{id}`: identidad autenticada y
   correo confirmado. Un no integrante recibe 404.
+- `GET /internal/publicaciones/{id}/ocupacion`: credencial `X-Roomies-Service`.
+  Devuelve ocupación activa, versión de ocupación y marca de finalización. Una
+  publicación sin arriendo tiene ocupación y versión cero y `finalizada: false`.
 - La reserva de Listado es firme, no caduca unilateralmente y usa la misma UUID.
-  La versión/capacidad queda congelada en el arriendo para este corte.
+  La incorporación sincroniza la capacidad del arriendo cuando recibe una
+  reserva firme de versión más reciente y queda al menos un cupo disponible.
 - El ledger y la intención de reservar se confirman antes del HTTP externo.
   La transacción siguiente bloquea operación, usuario, publicación y postulación,
   reserva, incorpora y escribe outbox. Una caída antes del commit se recupera

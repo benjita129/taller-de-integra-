@@ -21,7 +21,8 @@ VACANCIES="GREATEST(0,p.cupos_totales-p.ocupacion_confirmada-(SELECT count(*) FR
 APPLICATION_OPERATION=""" LEFT JOIN LATERAL (SELECT estado,jsonb_strip_nulls(jsonb_build_object(
  'id_operacion',id_operacion,'estado',estado,'codigo_error',codigo_error)) AS operacion
  FROM listado_applications.admision_operacion o WHERE o.id_postulacion=a.id_postulacion
- ORDER BY creado_en DESC,id_operacion DESC LIMIT 1) op ON true """
+ ORDER BY creado_en DESC,id_operacion DESC LIMIT 1) op
+ ON op.estado<>'Pendiente' OR a.estado='Preseleccionada' """
 
 
 class PostgresPublications:
@@ -110,12 +111,17 @@ class PostgresPublications:
             with self.transaction(): return self.update(id,data)
         previous=self.publication(id,lock=True)
         if previous is None: raise RuleViolation("Publicación no encontrada.",404)
-        if data.get("cupos_totales",previous["cupos_totales"])!=previous["cupos_totales"]:
-            if AdmissionsRepository(self).busy(id):
-                raise RuleViolation("Hay una incorporación pendiente; no puedes cambiar capacidad.",409)
-            # shortcut: capacidad con residentes se coordinará con Convivencia en C04.
-            if previous["estado"]=="Activa" or previous["ocupacion_confirmada"] not in (0,):
-                raise RuleViolation("Cambiar capacidad con residentes requiere coordinación con Convivencia.",409)
+        rules_changed=data.get("reglas",previous["reglas"])!=previous["reglas"]
+        capacity_changed=data.get("cupos_totales",previous["cupos_totales"])!=previous["cupos_totales"]
+        if previous["reglas_bloqueadas"] and rules_changed:
+            raise RuleViolation("Las reglas se fijaron al activar la publicación.",409)
+        if (rules_changed or capacity_changed) and AdmissionsRepository(self).busy(id):
+            raise RuleViolation("Hay una incorporación pendiente; reintenta después de que se confirme.",409)
+        if capacity_changed:
+            if previous["ocupacion_confirmada"] is None:
+                raise RuleViolation("Aún no se conoce la ocupación de la publicación.",409)
+            if data["cupos_totales"]<previous["ocupacion_confirmada"]:
+                raise RuleViolation("La capacidad no puede ser menor que la ocupación.",409)
             data={**data,"version_capacidad":previous["version_capacidad"]+1}
         if "reglas" in data: data={**data,"reglas":Jsonb(data["reglas"])}
         self.query("UPDATE listado_applications.publicacion SET "+",".join(k+"=%s" for k in data)+" WHERE id_publicacion=%s RETURNING id_publicacion",(*data.values(),id))
@@ -123,8 +129,31 @@ class PostgresPublications:
     def close(self,id):
         self.query("UPDATE listado_applications.publicacion SET estado='Cerrada',version_capacidad=version_capacidad+1 WHERE id_publicacion=%s AND estado<>'Cerrada' RETURNING id_publicacion",(id,))
 
-    def update_occupancy(self,id,count,version):
-        return self.query("UPDATE listado_applications.publicacion SET ocupacion_confirmada=%s,version_ocupacion=%s,estado=CASE WHEN estado='Cerrada' THEN estado WHEN %s>0 THEN 'Activa' ELSE 'Disponible' END WHERE id_publicacion=%s RETURNING id_publicacion",(count,version,count,id))
+    def activate(self,id):
+        self.query("""UPDATE listado_applications.publicacion
+            SET estado=CASE WHEN estado='Cerrada' THEN estado ELSE 'Activa' END,reglas_bloqueadas=true
+            WHERE id_publicacion=%s RETURNING id_publicacion""",(id,))
+
+    def update_occupancy(self,id,count,version,finalized):
+        return self.query("""UPDATE listado_applications.publicacion
+            SET ocupacion_confirmada=%s,version_ocupacion=%s,ocupacion_finalizada=%s,
+                reglas_bloqueadas=reglas_bloqueadas OR %s OR %s>0,
+                estado=CASE WHEN estado='Cerrada' THEN estado WHEN %s>0 THEN 'Activa' ELSE 'Disponible' END
+            WHERE id_publicacion=%s RETURNING id_publicacion""",(count,version,finalized,finalized,count,count,id))
+
+    def occupancy_candidates(self,after):
+        return self.query("""SELECT id_publicacion FROM listado_applications.publicacion
+            WHERE id_publicacion>%s AND tipo='Arrendador'
+              AND (ocupacion_confirmada IS NULL OR ocupacion_confirmada>0)
+            ORDER BY id_publicacion LIMIT 20""",(after,),many=True)
+
+    def record_expulsion(self,publication,user,version):
+        self.query("""INSERT INTO listado_applications.expulsion_publicacion(id_publicacion,id_usuario,version_ocupacion)
+            VALUES (%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id_usuario""",(publication,user,version))
+        recorded=self.query("""SELECT version_ocupacion FROM listado_applications.expulsion_publicacion
+            WHERE id_publicacion=%s AND id_usuario=%s""",(publication,user))
+        if recorded is None or recorded["version_ocupacion"]!=version:
+            raise RuleViolation("La expulsión corresponde a otros datos.",409)
 
     def images(self,id):
         return self.query("SELECT id_imagen,url,orden FROM listado_applications.imagen_publicacion WHERE id_publicacion=%s ORDER BY orden,id_imagen",(id,),True)
@@ -139,13 +168,25 @@ class PostgresPublications:
         return self.query("DELETE FROM listado_applications.imagen_publicacion WHERE id_publicacion=%s AND id_imagen=%s RETURNING url",(id,image_id))
 
     def postulate(self,id,user_id):
+        if self.query("""SELECT 1 FROM listado_applications.postulacion
+            WHERE id_publicacion=%s AND id_usuario=%s AND estado='Rechazada'
+            UNION ALL SELECT 1 FROM listado_applications.expulsion_publicacion
+            WHERE id_publicacion=%s AND id_usuario=%s LIMIT 1""",(id,user_id,id,user_id)):
+            raise RuleViolation("No puedes volver a postular después de un rechazo o expulsión.",409)
         try:
             return self.query("INSERT INTO listado_applications.postulacion (id_publicacion,id_usuario) VALUES (%s,%s) RETURNING *",(id,user_id))
         except psycopg.errors.UniqueViolation:
             raise RuleViolation("Ya existe una postulación vigente.",409) from None
 
-    def application(self,id,lock=False):
-        return self.query("SELECT * FROM listado_applications.postulacion WHERE id_postulacion=%s"+(" FOR UPDATE" if lock else ""),(id,))
+    def application(self,id,lock=False,include_history=False):
+        fields,join="a.*",""
+        if include_history:
+            fields+=""" ,op.operacion,COALESCE((SELECT jsonb_agg(jsonb_build_object('estado',h.estado,
+              'motivo',h.motivo,'fecha',h.fecha) ORDER BY h.id_historial)
+              FROM listado_applications.postulacion_historial h WHERE h.id_postulacion=a.id_postulacion),'[]') AS historial"""
+            join=APPLICATION_OPERATION
+        return self.query("SELECT "+fields+" FROM listado_applications.postulacion a"+join+
+                          " WHERE a.id_postulacion=%s"+(" FOR UPDATE OF a" if lock else ""),(id,))
 
     def applications(self,owner=None,publication=None,limit=100,after=None,state=None):
         conditions = ["a.id_usuario=%s" if owner is not None else "a.id_publicacion=%s"]
@@ -165,6 +206,18 @@ class PostgresPublications:
 
     def change(self,id,state,reason):
         return self.query("UPDATE listado_applications.postulacion SET estado=%s,motivo=%s,actualizada_en=clock_timestamp() WHERE id_postulacion=%s RETURNING *",(state,reason,id))
+
+    def cancel_open(self,reason,*,publication=None,admitted=None):
+        filters,params=("id_publicacion=%s",(publication,)) if admitted is None else (
+            "id_usuario=%s AND id_postulacion<>%s",(admitted["id_usuario"],admitted["id_postulacion"]))
+        self.query("""WITH cancelled AS (
+            UPDATE listado_applications.postulacion SET estado='Cancelada',motivo=%s,actualizada_en=clock_timestamp()
+            WHERE estado IN ('Pendiente','Preseleccionada') AND """+filters+"""
+            RETURNING id_postulacion,id_usuario,estado
+        )
+        INSERT INTO listado_applications.outbox(event_key,id_usuario,referencia_id,estado)
+        SELECT 'postulacion:'||id_postulacion||':'||estado,id_usuario,id_postulacion,estado FROM cancelled
+        ON CONFLICT DO NOTHING RETURNING event_key""",(reason,*params),many=True)
 
     def event(self,application):
         key=f"postulacion:{application['id_postulacion']}:{application['estado']}"

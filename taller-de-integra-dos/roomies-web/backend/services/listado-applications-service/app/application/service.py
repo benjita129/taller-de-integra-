@@ -14,14 +14,18 @@ class Repository(Protocol):
     def create(self, owner, data): ...
     def update(self, id, data): ...
     def close(self, id): ...
+    def update_occupancy(self, id, count, version, finalized): ...
+    def occupancy_candidates(self, after): ...
+    def record_expulsion(self, publication, user, version): ...
     def images(self, id): ...
     def image(self, id, reference, order): ...
     def order_image(self, id, image_id, order): ...
     def remove_image(self, id, image_id): ...
     def postulate(self, id, user_id): ...
-    def application(self, id, lock=False): ...
+    def application(self, id, lock=False, include_history=False): ...
     def applications(self, owner=None, publication=None): ...
     def change(self, id, state, reason): ...
+    def cancel_open(self, reason, *, publication=None, admitted=None): ...
     def event(self, application): ...
 
 
@@ -57,7 +61,10 @@ class Publications:
         return {"items":items,"siguiente_cursor":pagination.encode(items[-1],scope) if len(rows)>limit else None}
 
     def save(self,actor_id,data,image=None,id=None,retained=None,key=None):
-        data=validate_publication(data)
+        validated=validate_publication(data)
+        if id is not None and "reglas" not in data:
+            del validated["reglas"]
+        data=validated
         if id is None and data["tipo"] == "Arrendador" and data["categoria"] != "ofrezco":
             raise RuleViolation("Una publicación de arrendador debe ofrecer un espacio.")
         if id is not None:
@@ -71,28 +78,65 @@ class Publications:
             row=self.repository.publication(id,lock=True)
             if row is None or row["id_usuario"]!=actor_id:
                 raise RuleViolation("Publicación no encontrada.",404)
-            Admissions(self).guard_mutation(id)
-            self.repository.close(id)
+            if row["estado"]!="Cerrada":
+                Admissions(self).guard_mutation(id)
+            self.close_locked(id)
         return self.get(id,actor_id)
 
-    def occupancy_update(self,id,count,version):
+    def close_locked(self,id):
+        self.repository.close(id)
+        self.repository.cancel_open("Publicación cerrada",publication=id)
+
+    def occupancy_update(self,id,count,version,finalized=None,expelled=None):
         with self.repository.transaction():
             row=self.repository.publication(id,lock=True)
             if row is None:
                 raise RuleViolation("Publicación no encontrada.",404)
-            self.occupancy_update_locked(row,count,version)
+            self.occupancy_update_locked(row,count,version,finalized)
+            if expelled is not None:
+                self.repository.record_expulsion(id,expelled,version)
         return self.get(id)
 
-    def occupancy_update_locked(self,row,count,version):
-        if count > row["cupos_totales"]:
-            raise RuleViolation("Ocupación mayor que la capacidad.",409)
+    def occupancy_update_locked(self,row,count,version,finalized=None):
         if version < row["version_ocupacion"]:
             return
+        was_finalized=row["ocupacion_finalizada"]
         if version == row["version_ocupacion"] and row["ocupacion_confirmada"] is not None:
-            if count != row["ocupacion_confirmada"]:
+            if count != row["ocupacion_confirmada"] or (finalized is not None and finalized!=was_finalized):
                 raise RuleViolation("La versión de ocupación corresponde a otros datos.",409)
             return
-        self.repository.update_occupancy(row["id_publicacion"],count,version)
+        if count > row["cupos_totales"]:
+            raise RuleViolation("Ocupación mayor que la capacidad.",409)
+        if was_finalized and (count>0 or finalized is False):
+            raise RuleViolation("La ocupación del arriendo finalizado no puede reabrirse.",409)
+        if finalized and count!=0:
+            raise RuleViolation("Un arriendo finalizado no puede mantener ocupación.",409)
+        id=row["id_publicacion"]
+        if finalized:
+            Admissions(self).guard_mutation(id)
+            self.close_locked(id)
+        self.repository.update_occupancy(id,count,version,finalized or was_finalized)
+
+    def reconcile_occupancy(self,after=0):
+        candidates=self.repository.occupancy_candidates(after)
+        for candidate in candidates:
+            id=candidate["id_publicacion"]
+            try:
+                projection=self.occupancy.snapshot(id)
+            except DependencyUnavailable:
+                return id
+            after=id
+            try:
+                with self.repository.transaction():
+                    row=self.repository.publication(id,lock=True)
+                    if row and not Admissions(self).operations.busy(id) and (
+                        projection["version_ocupacion"]>0 or row["estado"]!="Activa"
+                    ):
+                        self.occupancy_update_locked(row,projection["ocupacion"],
+                            projection["version_ocupacion"],projection["finalizada"])
+            except RuleViolation:
+                continue
+        return after if candidates else 0
 
     def postulate(self,actor_id,id):
         with self.repository.transaction():
@@ -133,6 +177,8 @@ class Publications:
             row=self.repository.application(id,lock=True)
             if row["id_usuario"]!=actor_id:
                 raise RuleViolation("Solo el postulante puede retirar.",403)
+            if row["estado"]=="Cancelada" and row["motivo"]!="Retiro voluntario":
+                raise RuleViolation("La postulación ya fue cancelada.",409)
             operation=Admissions(self).operations.latest(id)
             if operation and operation["estado"]=="Pendiente":
                 raise RuleViolation("La incorporación sigue en curso; consulta su resultado.",409)

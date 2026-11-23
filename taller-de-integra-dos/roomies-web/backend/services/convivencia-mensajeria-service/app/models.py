@@ -26,6 +26,13 @@ class OccupancyConfirmation(BaseModel):
     version_ocupacion: PositiveId
 
 
+class Occupancy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ocupacion: Annotated[int, Field(strict=True, ge=0, le=2147483647)]
+    version_ocupacion: Annotated[int, Field(strict=True, ge=0, le=9223372036854775807)]
+    finalizada: Annotated[bool, Field(strict=True)]
+
+
 class Receipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id_incorporacion: UUID

@@ -66,11 +66,33 @@ export async function publicationsBrowser({ base, cookie, playwrightPath, browse
     assert.equal(keys.length, 2);
     assert.ok(keys[0]);
     assert.equal(keys[0], keys[1]);
-    await page.route("**/web-api/publicaciones/42", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id_publicacion: 42, id_region: 9, id_comuna: selected.id_comuna, titulo: "Publicación existente", categoria: "ofrezco", tipo: "Arrendador", tipo_vivienda: "habitacion", precio: 150000, ubicacion: "Centro", cupos_totales: 2, mascota: "no", descripcion: "Detalle existente", imagenes: [], reglas: ["Sin humo"] }) }));
+    let rulesLocked = false;
+    await page.route("**/web-api/publicaciones/42", route => {
+      const json = { id_publicacion: 42, id_region: 9, id_comuna: selected.id_comuna, titulo: "Publicación existente", categoria: "ofrezco", tipo: "Arrendador", tipo_vivienda: "habitacion", precio: 150000, ubicacion: "Centro", cupos_totales: 2, mascota: "no", descripcion: "Detalle existente", imagenes: [], reglas: ["Sin humo"], estado: rulesLocked ? "Cerrada" : "Disponible", reglas_bloqueadas: rulesLocked };
+      if (route.request().method() === "GET") return route.fulfill({ json });
+      assert.equal(route.request().method(), "PUT");
+      const body = route.request().postDataBuffer().toString();
+      if (rulesLocked) assert.doesNotMatch(body, /name="reglas"/);
+      else assert.match(body, /name="reglas"\r\n\r\n\["Sin humo","Cuidar espacios comunes"\]\r\n/);
+      return route.fulfill({ status: 409, json: { detail: "La capacidad no puede quedar bajo la ocupación actual." } });
+    });
     await page.goto(`${base}/editar-publicacion?id=42`);
     await page.getByLabel("Comuna de La Araucanía").getByRole("option", { name: "Temuco", exact: true }).waitFor({ state: "attached" });
     assert.equal(await page.getByLabel("Región", { exact: true }).inputValue(), "La Araucanía");
     assert.equal(await page.getByLabel("Comuna de La Araucanía").inputValue(), String(selected.id_comuna));
+    assert.equal(await page.getByLabel("Regla 1", { exact: true }).inputValue(), "Sin humo");
+    await page.getByRole("button", { name: "Agregar regla", exact: true }).click();
+    await page.getByLabel("Regla 2", { exact: true }).fill("Cuidar espacios comunes");
+    await page.getByRole("button", { name: "Guardar cambios", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "La capacidad no puede quedar bajo la ocupación actual." }).waitFor();
+    assert.equal(await page.getByLabel("Regla 2", { exact: true }).inputValue(), "Cuidar espacios comunes");
+    rulesLocked = true;
+    await page.reload();
+    await page.getByLabel("Comuna de La Araucanía").getByRole("option", { name: "Temuco", exact: true }).waitFor({ state: "attached" });
+    assert.equal(await page.getByLabel("Regla 1", { exact: true }).getAttribute("readonly"), "");
+    assert.equal(await page.getByRole("button", { name: "Agregar regla", exact: true }).count(), 0);
+    await page.getByRole("button", { name: "Guardar cambios", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "La capacidad no puede quedar bajo la ocupación actual." }).waitFor();
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

@@ -39,7 +39,15 @@ export function createApplicationsFixture() {
       assert.equal(url.pathname, "/api/postulaciones/8/estado");
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
-      assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { estado: "Aceptada" });
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      if (behavior === "closed") {
+        assert.deepEqual(body, { estado: "Rechazada", motivo: "Otra alternativa" });
+        current = { ...initial, estado: "Cancelada", motivo: "Publicación cerrada" };
+        response.statusCode = 409;
+        response.end(JSON.stringify({ detail: "private-service-error" }));
+        return true;
+      }
+      assert.deepEqual(body, { estado: "Aceptada" });
       const key = request.headers["idempotency-key"];
       assert.match(key, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
       keys.push(key);
@@ -118,6 +126,15 @@ export async function applicationsBrowser({ base, cookie, fixture, playwrightPat
     assert.equal(await retry.count(), 0);
     assert.doesNotMatch(await page.locator("main").innerText(), /private-service-error/);
     assert.deepEqual(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } })), { local: {}, session: {} });
+
+    fixture.reset("closed");
+    await page.goto(`${base}/postulantes/7`);
+    await page.getByLabel("Motivo", { exact: true }).fill("Otra alternativa");
+    await page.getByRole("button", { name: "Rechazar postulación", exact: true }).click();
+    await page.getByText("Cancelada", { exact: true }).waitFor();
+    assert.equal(await page.getByText("Motivo: Publicación cerrada", { exact: true }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "Rechazar postulación", exact: true }).count(), 0);
+
     fixture.reset("pages");
     await page.goto(`${base}/postulantes/7`);
     await page.getByRole("heading",{name:"Postulación 119",exact:true}).waitFor();

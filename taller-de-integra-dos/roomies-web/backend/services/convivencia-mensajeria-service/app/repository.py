@@ -53,6 +53,14 @@ class PostgresRepository:
                 raise ServiceError("RENTAL_NOT_FOUND", "Arriendo no encontrado.", 404)
         return self.get(row["id_arriendo"], user_id)
 
+    def occupancy(self, publication_id):
+        with self.transaction() as c:
+            row = c.execute("""SELECT a.version_ocupacion, a.estado='Finalizado' AS finalizada,
+                (SELECT count(*) FROM convivencia_mensajeria.pertenencia p
+                 WHERE p.id_arriendo=a.id_arriendo AND p.estado='Activa') AS ocupacion
+                FROM convivencia_mensajeria.arriendo a WHERE a.id_publicacion=%s""", (publication_id,)).fetchone()
+            return row or {"ocupacion": 0, "version_ocupacion": 0, "finalizada": False}
+
     def overlapped(self, a, b):
         with self.transaction() as c:
             return c.execute("""SELECT EXISTS (

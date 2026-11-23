@@ -34,20 +34,24 @@ class Admissions:
         return {name:operation[name] for name in ("id_postulacion","id_publicacion","id_usuario","version_capacidad")}
 
     def detail(self,actor,application):
-        row=self.repository.application(application)
+        row=self.repository.application(application,include_history=True)
         if row is None:
             raise RuleViolation("Postulación no encontrada.",404)
         publication=self.service.get(row["id_publicacion"])
         if actor not in {row["id_usuario"],publication["id_usuario"]}:
             raise RuleViolation("Postulación no encontrada.",404)
-        return self.view(row,self.operations.latest(application))
+        return self.view(row,row["operacion"])
 
     @staticmethod
     def view(application,operation):
-        result={**application,"id_arriendo":application.get("id_arriendo"),"incorporacion_pendiente":bool(operation and operation["estado"]=="Pendiente"),"operacion":None}
+        if operation and operation["estado"]=="Pendiente" and application["estado"]!="Preseleccionada":
+            operation=None
+        result={**application,"id_arriendo":application.get("id_arriendo"),
+                "incorporacion_pendiente":bool(operation and operation["estado"]=="Pendiente"),
+                "operacion":None}
         if operation:
             result["operacion"]={"id_operacion":str(operation["id_operacion"]),"estado":operation["estado"]}
-            if operation["codigo_error"]:
+            if operation.get("codigo_error"):
                 result["operacion"]["codigo_error"]=operation["codigo_error"]
         return result
 
@@ -77,9 +81,14 @@ class Admissions:
         try: self.deliver(key)
         except DependencyUnavailable: pass
         operation=self.operations.operation(key)
-        if operation["estado"]!="Pendiente":
-            return operation["http_status"],operation["resultado"]
-        return 202,self.detail(actor,application)
+        if operation["estado"]=="Pendiente":
+            detail=self.detail(actor,application)
+            if detail["incorporacion_pendiente"]:
+                return 202,detail
+            operation=self.operations.operation(key)
+            if operation["estado"]=="Pendiente":
+                return 409,{**detail,"code":"APPLICATION_ALREADY_PROCESSED","detail":"La postulación ya fue cancelada."}
+        return operation["http_status"],operation["resultado"]
 
     def deliver(self,key):
         with self.operations.delivery(key) as acquired:
@@ -109,9 +118,13 @@ class Admissions:
                     raise DependencyUnavailable("El recibo no tiene una reserva firme.")
                 if reservation["id_arriendo"] is not None and reservation["id_arriendo"]!=receipt["id_arriendo"]:
                     raise DependencyUnavailable("El recibo y la confirmación no coinciden.")
-                self.repository.query("UPDATE listado_applications.postulacion SET estado='Aceptada',id_arriendo=%s,actualizada_en=clock_timestamp() WHERE id_postulacion=%s RETURNING id_postulacion",(receipt["id_arriendo"],application["id_postulacion"]))
-                application=self.repository.application(application["id_postulacion"])
+                reason=(operation["solicitud"]["motivo"] or "").strip() or None
+                application=self.repository.query("""UPDATE listado_applications.postulacion
+                    SET estado='Aceptada',motivo=%s,id_arriendo=%s,actualizada_en=clock_timestamp()
+                    WHERE id_postulacion=%s RETURNING *""",(reason,receipt["id_arriendo"],application["id_postulacion"]))
+                self.repository.activate(application["id_publicacion"])
                 self.repository.event(application)
+                self.repository.cancel_open("Incorporación confirmada en otro arriendo",admitted=application)
                 result=self.view(application,{**operation,"estado":"Confirmada"})
                 self.operations.finish(key,200,receipt,result=result)
 

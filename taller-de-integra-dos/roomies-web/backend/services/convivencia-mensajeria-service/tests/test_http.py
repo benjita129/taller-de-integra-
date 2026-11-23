@@ -97,6 +97,18 @@ def test_get_requiere_sesion(http):
         assert result.json()["code"] == "UNAUTHENTICATED"
 
 
+def test_ocupacion_de_publicacion_requiere_credencial_interna(http):
+    client, service, _ = http
+    path = "/internal/publicaciones/7/ocupacion"
+    assert client.get(path).status_code == 403
+    assert client.get("/internal/publicaciones/0/ocupacion", headers=headers()).status_code == 422
+    service.repository.occupancy.assert_not_called()
+    occupancy = {"ocupacion": 1, "version_ocupacion": 3, "finalizada": False}
+    service.repository.occupancy.return_value = occupancy
+    assert client.get(path, headers=headers()).json() == occupancy
+    service.repository.occupancy.assert_called_once_with(7)
+
+
 def test_get_pasa_usuario_autenticado_y_oculta_arriendo_ajeno(http):
     client, service, application = http
     application.dependency_overrides[confirmed_actor] = lambda: SimpleNamespace(user_id=2)

@@ -16,6 +16,8 @@ type Publication = {
   id_comuna?: number;
   imagenes?: PublicationImage[];
   reglas?: string[];
+  reglas_bloqueadas?: boolean;
+  estado?: string;
   titulo: string;
   categoria?: string;
   tipo_vivienda?: string;
@@ -38,18 +40,21 @@ function PublicationEditor({ id }: { id: string }) {
   const router = useRouter();
   const operation = useRef<string | null>(null);
   const [publication, setPublication] = useState<Publication | null>(null);
+  const [rules, setRules] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(Boolean(id));
+  const rulesLocked = publication?.reglas_bloqueadas ?? (publication?.estado === "Activa");
 
   useEffect(() => {
     const controller = new AbortController();
     fetch(`/web-api/publicaciones/${id}`, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("No se pudo cargar la publicación para editar.");
-        const data = await response.json();
+        const data: Publication = await response.json();
         if (!controller.signal.aborted) {
           setPublication(data);
+          setRules(data.reglas ?? []);
         }
       }).catch(() => {
         if (!controller.signal.aborted) setMessage("No se pudo cargar la publicación para editar.");
@@ -65,7 +70,7 @@ function PublicationEditor({ id }: { id: string }) {
     if (!publication?.tipo) { setMessage("No se pudo determinar el tipo original. Recarga la publicación."); return; }
     form.set("tipo", publication.tipo);
     form.set("permitir_comentarios", publication.permitir_comentarios ? "true" : "false");
-    form.set("reglas", JSON.stringify(publication.reglas ?? []));
+    if (!rulesLocked) form.set("reglas", JSON.stringify(rules.map(rule => rule.trim()).filter(Boolean)));
 
     const invalid = validatePublicationForm(form);
     if (invalid) { setMessage(invalid); return; }
@@ -82,10 +87,9 @@ function PublicationEditor({ id }: { id: string }) {
 
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setMessage(payload?.detail || "No se pudo guardar la publicación.");
+        setMessage(typeof payload?.detail === "string" ? payload.detail : "No se pudo guardar la publicación.");
         return;
       }
-      setPublication(payload);
       router.push("/mis-publicaciones");
     } catch {
       setMessage("No se pudo actualizar la publicación.");
@@ -152,6 +156,26 @@ function PublicationEditor({ id }: { id: string }) {
           <span>Descripción</span>
           <textarea name="descripcion" rows={6} required maxLength={5000} defaultValue={publication.descripcion || ""} style={{ padding: 10, borderRadius: 8, border: "1px solid #d1d5db", resize: "vertical" }} />
         </label>
+
+        <fieldset disabled={pending}>
+          <legend>Reglas del arriendo</legend>
+          {rulesLocked ? <p>Las reglas quedaron fijas al activarse el arriendo.</p> : null}
+          {rules.map((rule, index) => <div key={index} style={{ display: "grid", gap: 8, marginBottom: 12 }}>
+            <label htmlFor={`regla-${index + 1}`}>Regla {index + 1}</label>
+            <textarea id={`regla-${index + 1}`} rows={2} value={rule} readOnly={rulesLocked} onChange={event => {
+              const { value } = event.currentTarget;
+              setRules(current => current.map((text, position) => position === index ? value : text));
+            }} />
+            {!rulesLocked && <Button type="button" variant="secondary" aria-label={`Quitar regla ${index + 1}`} onClick={() => {
+              operation.current = null;
+              setRules(current => current.filter((_, position) => position !== index));
+            }}>Quitar</Button>}
+          </div>)}
+          {!rulesLocked && <Button type="button" variant="secondary" disabled={rules.length >= 50} onClick={() => {
+            operation.current = null;
+            setRules(current => [...current, ""]);
+          }}>Agregar regla</Button>}
+        </fieldset>
 
         {message ? <p role="alert" style={{ color: "#b91c1c", margin: 0 }}>{message}</p> : null}
 

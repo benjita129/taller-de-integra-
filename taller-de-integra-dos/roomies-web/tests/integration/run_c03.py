@@ -63,7 +63,7 @@ class FaultProxy:
                         self.close_connection = True
                         return
                     self.reply(response.status_code, response.content, response.headers.get("Idempotency-Replayed"))
-                except (httpx.HTTPError, BrokenPipeError, ConnectionResetError):
+                except (httpx.HTTPError, ConnectionError):
                     self.close_connection = True
 
             def reply(self, status, body, replay=None):
@@ -125,7 +125,9 @@ def scenarios(client, gateway, people, database, admission_proxy, callbacks, res
     def terminal(id):
         def read():
             row = request("GET", f"/api/postulaciones/{id}").json()
-            return row if row["estado"] == "Aceptada" or row.get("operacion", {}).get("estado") == "Rechazada" else None
+            operation = row.get("operacion") or {}
+            done = row["estado"] in {"Aceptada", "Cancelada"} and operation.get("estado") != "Pendiente"
+            return row if done or operation.get("estado") == "Rechazada" else None
         return eventually(read)
 
     def count(user=None, publication_id=None):
@@ -170,6 +172,11 @@ def scenarios(client, gateway, people, database, admission_proxy, callbacks, res
         list(pool.map(accept, applications))
     assert sum(terminal(id)["estado"] == "Aceptada" for id in applications) == 1
     assert count(user=ids[5]) == 1
+    eventually(lambda: database.execute("""SELECT NOT EXISTS (
+        SELECT 1 FROM listado_applications.admision_operacion o
+        LEFT JOIN listado_applications.admision_reserva r USING(id_operacion)
+        WHERE o.id_postulacion=ANY(%s) AND (o.estado='Pendiente' OR r.estado='Reservada')
+    )""", (applications,)).fetchone()[0])
     print("PASS pertenencia única ante dos arriendos concurrentes", flush=True)
 
     admission_proxy.set("hold")
@@ -221,6 +228,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-bin", type=Path)
     parser.add_argument("--web", action="store_true", help="Comprobar SCRUM-112 también con Next y BFF reales aislados")
+    parser.add_argument("--c04", action="store_true", help="Comprobar también cierre, postulaciones y ocupación de S3R-C04")
     args = parser.parse_args()
     candidates = [args.pg_bin] if args.pg_bin else []
     found = shutil.which("initdb")
@@ -268,9 +276,10 @@ def main():
 
         origins = {name: f"http://127.0.0.1:{port()}" for name in ("auth", "listado", "convivencia", "gateway")}
         admin_key = "sb_secret_disposable_c03_only_000000000000"
+        internal_token = "synthetic-c03-service-key-000000000000"
         with IdentityFixture(admin_key=admin_key) as identity, FaultProxy(origins["convivencia"], lambda method, path: path == "/internal/incorporaciones") as admission_proxy, FaultProxy(origins["listado"], lambda method, path: method in {"PUT", "DELETE"} and "/reservas/" in path) as callbacks, httpx.Client(timeout=20, trust_env=False) as client:
             allowed = [pg_port, identity.server.server_port, admission_proxy.server.server_port, callbacks.server.server_port, *[int(value.rsplit(":", 1)[1]) for value in origins.values()]]
-            common = {**clean, "ROOMIES_LOCAL_MODE": "1", "ROOMIES_RUNTIME_MODE": "disposable", "ROOMIES_PERSISTENCE_LAYOUT": "private-v1", "ROOMIES_TEST_RUNNER": "disposable-only", "ROOMIES_ALLOWED_PORTS": json.dumps(allowed), "ROOMIES_AUTH_PROVIDER_URL": identity.origin, "ROOMIES_AUTH_PUBLISHABLE_KEY": identity.publishable_key, "ROOMIES_INTERNAL_TOKEN": "synthetic-c03-service-key-000000000000", "ROOMIES_CURSOR_SECRET": "synthetic-c03-cursor-key-000000000000", "AUTH_USERS_UPSTREAM_URL": origins["auth"], "LISTADO_UPSTREAM_URL": origins["listado"], "CONVIVENCIA_UPSTREAM_URL": admission_proxy.origin}
+            common = {**clean, "ROOMIES_LOCAL_MODE": "1", "ROOMIES_RUNTIME_MODE": "disposable", "ROOMIES_PERSISTENCE_LAYOUT": "private-v1", "ROOMIES_TEST_RUNNER": "disposable-only", "ROOMIES_ALLOWED_PORTS": json.dumps(allowed), "ROOMIES_AUTH_PROVIDER_URL": identity.origin, "ROOMIES_AUTH_PUBLISHABLE_KEY": identity.publishable_key, "ROOMIES_INTERNAL_TOKEN": internal_token, "ROOMIES_CURSOR_SECRET": "synthetic-c03-cursor-key-000000000000", "AUTH_USERS_UPSTREAM_URL": origins["auth"], "LISTADO_UPSTREAM_URL": origins["listado"], "CONVIVENCIA_UPSTREAM_URL": admission_proxy.origin}
             roles = {"auth": "sql_auth_users", "listado": "sql_listado_applications", "convivencia": "sql_convivencia_mensajeria"}
             variables = {"auth": "AUTH_USERS_DATABASE_URL", "listado": "LISTADO_DATABASE_URL", "convivencia": "CONVIVENCIA_DATABASE_URL"}
 
@@ -293,7 +302,7 @@ def main():
 
             for name in ("auth", "listado", "convivencia", "gateway"): start(name)
             people = []
-            for index in range(14 if args.web else 11):
+            for index in range(21 if args.c04 else 14 if args.web else 11):
                 email = f"c03-{index}@example.com"
                 response = client.post(identity.origin + "/auth/v1/signup", headers={"apikey": identity.publishable_key}, json={"email": email, "password": "Synthetic-password-123", "data": {"nombre": f"Prueba {index}", "fecha_nacimiento": "2000-01-01"}})
                 assert response.status_code == 200
@@ -304,6 +313,10 @@ def main():
                 people.append(person)
             with psycopg.connect(admin, autocommit=True) as database:
                 scenarios(client, origins["gateway"], people, database, admission_proxy, callbacks, lambda: (stop("listado"), start("listado")))
+                if args.c04:
+                    sys.path.insert(0, str(Path(__file__).resolve().parent))
+                    from c04 import exercise
+                    exercise(client, origins, people[14:], database, admission_proxy, callbacks, internal_token, eventually)
                 if args.web:
                     sys.path.insert(0,str(Path(__file__).resolve().parent))
                     from web112 import exercise

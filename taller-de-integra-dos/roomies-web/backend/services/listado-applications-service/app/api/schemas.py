@@ -1,6 +1,7 @@
 """DTO público y descripción del multipart consumido por web/Expo."""
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 from pydantic import BaseModel, Field
 
 
@@ -32,6 +33,7 @@ class Publication(BaseModel):
     id_region:int|None=Field(description="CUT de región; null solo en datos heredados pendientes de conciliación.")
     id_comuna:int|None
     reglas:list[str]
+    reglas_bloqueadas:bool=Field(description="Las reglas quedan fijas en la primera activación.")
 
 
 class PublicationDetail(Publication):
@@ -60,6 +62,35 @@ class Commune(BaseModel):
     nombre:str
 
 
+ApplicationState=Literal["Pendiente","Preseleccionada","Aceptada","Rechazada","Cancelada"]
+
+
+class ApplicationHistoryEntry(BaseModel):
+    estado:ApplicationState
+    motivo:str|None
+    fecha:datetime
+
+
+class AdmissionOperation(BaseModel):
+    id_operacion:UUID
+    estado:Literal["Pendiente","Confirmada","Rechazada"]
+    codigo_error:str|None=None
+
+
+class ApplicationDetail(BaseModel):
+    id_postulacion:int
+    id_publicacion:int
+    id_usuario:int
+    estado:ApplicationState
+    motivo:str|None
+    fecha_postulacion:datetime
+    actualizada_en:datetime
+    id_arriendo:int|None
+    operacion:AdmissionOperation|None
+    incorporacion_pendiente:bool
+    historial:list[ApplicationHistoryEntry]
+
+
 MULTIPART={
     "parameters":[{"in":"header","name":"Idempotency-Key","required":False,
                    "description":"UUID estable por intento lógico; reutilizar en reintentos. Otro cuerpo con la misma clave devuelve 409.",
@@ -78,7 +109,7 @@ MULTIPART={
             "mascota":{"type":"string","enum":["si","no"]},
             "cupos_totales":{"type":"integer","minimum":1,"maximum":2147483647},
             "id_region":{"type":"integer","minimum":1},"id_comuna":{"type":"integer","minimum":1},
-            "reglas":{"type":"string","description":"Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla."},
+            "reglas":{"type":"string","description":"Lista JSON de hasta 50 reglas textuales, 1-1000 caracteres por regla. Omitir en una edición conserva las vigentes; se congelan en la primera activación."},
             "permitir_comentarios":{"type":"boolean","default":False,"deprecated":True},
             "imagenes":{"type":"array","maxItems":5,"items":{"type":"string","format":"binary"},"description":"JPEG/PNG/WebP; máximo 5 000 000 bytes y 20 megapíxeles decodificados cada archivo. Hasta 5 imágenes totales al sumar conservadas."},
             "imagenes_conservar":{"type":"string","description":"Solo edición: lista JSON de IDs propios, en el orden deseado. Omitir conserva las vigentes; [] las quita."}

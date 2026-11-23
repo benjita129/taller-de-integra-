@@ -83,7 +83,7 @@ export async function handleSavePublication(
         ...(request.headers.has("Idempotency-Key") ? { "Idempotency-Key": request.headers.get("Idempotency-Key")! } : {}) },
     });
     if (saved.status === 401) return expired();
-    if (saved.status === 403) return authReply(403, { detail: "No tienes permiso para crear publicaciones." });
+    if (saved.status === 403) return authReply(403, { detail: method === "PUT" ? "No tienes permiso para editar esta publicación." : "No tienes permiso para crear publicaciones." });
     if (saved.status === 413) return authReply(413, { detail: "La imagen debe pesar como máximo 5 MB." });
     if ([409, 415, 422].includes(saved.status)) {
       let payload: unknown;
@@ -107,7 +107,7 @@ export async function handleSavePublication(
 export const handleCreatePublication = handleSavePublication;
 
 type Operation = "mine" | "edit" | "close";
-const fields = ["id_publicacion", "titulo", "precio", "estado", "tipo", "ubicacion", "cupos_totales", "cupos_disponibles", "imagenes", "categoria", "tipo_vivienda", "mascota", "descripcion", "permitir_comentarios", "id_region", "id_comuna", "reglas"];
+const fields = ["id_publicacion", "titulo", "precio", "estado", "tipo", "ubicacion", "cupos_totales", "cupos_disponibles", "imagenes", "categoria", "tipo_vivienda", "mascota", "descripcion", "permitir_comentarios", "id_region", "id_comuna", "reglas", "reglas_bloqueadas"];
 function publication(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || !("id_publicacion" in value) || !Number.isSafeInteger(value.id_publicacion) || Number(value.id_publicacion) < 1) throw new Error("Invalid response");
   const source = value as Record<string, unknown>;
@@ -147,6 +147,8 @@ export async function handlePublicationRequest(
           (body.siguiente_cursor !== null && typeof body.siguiente_cursor !== "string")) throw new Error("Invalid list");
       return authReply(200, { items: body.items.map(publication), siguiente_cursor: body.siguiente_cursor });
     }
-    return authReply(200, publication(body));
+    const result = publication(body);
+    if (result.id_publicacion !== Number(id) || (operation === "close" && result.estado !== "Cerrada")) throw new Error("Invalid response");
+    return authReply(200, result);
   } catch { return unavailable(); }
 }

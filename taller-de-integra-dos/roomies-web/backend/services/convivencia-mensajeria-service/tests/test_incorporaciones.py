@@ -99,11 +99,33 @@ def test_misma_clave_concurrente_solo_un_resultado(repository, ports):
     assert count("pertenencia") == 1
 
 
-def test_capacidad_versionada_no_se_sobrescribe(service):
+def test_capacidad_versionada_avanza_solo_con_reserva_compatible(service, repository, ports):
     assert service.incorporate(uuid4(), payload())[0] == 201
-    status, body, _ = service.incorporate(uuid4(), payload(user=3, application=10, version=2))
-    assert status == 409
-    assert body["code"] == "CAPACITY_VERSION_CONFLICT"
+    ports[1].capacity = 3
+    assert service.incorporate(uuid4(), payload(user=3, application=10, version=2))[0] == 201
+    assert repository.mine(3)["cupos_totales"] == 3
+    assert repository.mine(3)["version_capacidad"] == 2
+    ports[1].capacity = 2
+    for version in [1, 2]:
+        status, body, _ = service.incorporate(uuid4(), payload(user=4, application=11, version=version))
+        assert status == 409
+        assert body["code"] == "CAPACITY_VERSION_CONFLICT"
+    ports[1].capacity = 1
+    status, body, _ = service.incorporate(uuid4(), payload(user=4, application=11, version=3))
+    assert status == 409 and body["code"] == "NO_CAPACITY"
+    assert repository.mine(3)["version_capacidad"] == 2
+    assert repository.occupancy(7) == {"ocupacion": 2, "version_ocupacion": 2, "finalizada": False}
+
+
+def test_ocupacion_de_arriendo_finalizado_y_sin_arriendo(service, repository):
+    assert repository.occupancy(7) == {"ocupacion": 0, "version_ocupacion": 0, "finalizada": False}
+    assert service.incorporate(uuid4(), payload())[0] == 201
+    with psycopg.connect(os.environ["CONVIVENCIA_TEST_ADMIN_DSN"]) as connection:
+        connection.execute("UPDATE convivencia_mensajeria.pertenencia SET estado='Inactiva',terminada_en=clock_timestamp()")
+        connection.execute("UPDATE convivencia_mensajeria.arriendo SET estado='Finalizado',version_ocupacion=2")
+    assert repository.occupancy(7) == {"ocupacion": 0, "version_ocupacion": 2, "finalizada": True}
+    status, body, _ = service.incorporate(uuid4(), payload(user=3, application=10))
+    assert status == 409 and body["code"] == "PUBLICATION_CLOSED"
     assert count("pertenencia") == 1
 
 

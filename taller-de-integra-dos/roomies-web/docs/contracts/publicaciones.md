@@ -15,7 +15,9 @@ El OpenAPI del proceso se publica en `/openapi.json`.
 | GET `/api/publicaciones/mias` | JWT confirmado; solo publicaciones del actor, incluidas cerradas. |
 | POST `/api/publicaciones` | JWT confirmado; multipart; propietario derivado del JWT. |
 | PUT `/api/publicaciones/{id}` | Multipart; solo propietario. Conserva fecha de publicación. |
-| PATCH `/api/publicaciones/{id}/cerrar` | Solo propietario; conserva imágenes. |
+| PATCH `/api/publicaciones/{id}/cerrar` | Solo propietario. Cancela solicitudes abiertas y conserva imágenes e integrantes. El reintento devuelve el aviso cerrado. |
+| GET `/api/postulaciones/{id}` | Postulante o dueño del aviso. Devuelve el estado vigente y el historial cronológico. |
+| POST `/api/postulaciones/{id}/retiro` | Solo postulante. Retira una solicitud Pendiente o Preseleccionada. |
 | GET `/api/regiones` | Catálogo nacional acotado, sin paginar. |
 | GET `/api/regiones/{id}/comunas` | Comunas de esa región. |
 
@@ -48,14 +50,50 @@ la API conserva las demás regiones y valida siempre la pareja región/comuna.
 
 Una ocupación desconocida se expresa como `null` en el detalle y excluye el aviso
 del catálogo de vacantes. Las nuevas publicaciones parten de ocupación cero.
-La copia versionada recibe confirmaciones internas de Convivencia; su integración
-remota y la garantía de admisión concurrente corresponden a C03/C04/F01.
+La copia versionada recibe confirmaciones internas de Convivencia. Los cupos
+disponibles descuentan también las reservas de incorporaciones en curso.
+
+## Ciclo de postulación y ocupación
+
+El cierre manual y la finalización del arriendo retiran la publicación del
+catálogo y cancelan sus solicitudes Pendiente y Preseleccionada. El detalle
+público sigue accesible y el aviso cerrado devuelve cero cupos. Si hay una
+incorporación en curso, el cierre manual responde 409 hasta recuperar su
+resultado. El arrendador decide Preseleccionada, Rechazada o Aceptada.
+`Cancelada` se registra por retiro voluntario o por un efecto automático del
+servicio. Un rechazo o expulsión impide volver a postular al mismo aviso.
+
+Una incorporación confirmada conserva su propia postulación Aceptada y cancela
+las demás solicitudes abiertas de esa persona. Los cambios guardan estado,
+fecha y motivo en `historial` y el detalle los devuelve en orden cronológico.
+Para registros anteriores a la migración se conserva el último estado conocido.
+
+`PUT /internal/publicaciones/{id}/ocupacion` recibe `ocupacion` y
+`version_ocupacion`, con `finalizada` e `id_usuario_expulsado` opcionales.
+La llamada exige el token interno compartido y se ejecuta fuera del Gateway
+público. Una versión anterior conserva la ocupación vigente. Una versión
+repetida con la misma ocupación es inocua. Un cambio en el contenido de la
+versión vigente devuelve 409. Un evento finalizado exige ocupación cero y
+cierra el aviso en la misma transacción. Un evento de expulsión atrasado
+registra el usuario sin modificar la ocupación.
+
+Listado concilia los avisos con ocupación desconocida o positiva consultando
+`GET /internal/publicaciones/{id}/ocupacion` en Convivencia cuando
+`CONVIVENCIA_UPSTREAM_URL` está configurada. La conciliación espera a que las
+incorporaciones en curso resuelvan sus reservas. El flujo F03 debe emitir el
+evento cuando el dueño retire a un integrante.
 
 ## Formulario e imágenes
 
 Campos: `titulo`, `descripcion`, `ubicacion`, `precio`, `cupos_totales`, `tipo`,
 `tipo_vivienda`, `categoria`, `mascota`, `id_region`, `id_comuna`;
-`reglas` admite una lista JSON de textos opcional. Precio CLP entero entre
+`reglas` admite una lista JSON de textos opcional. En edición, omitirla conserva
+las reglas existentes. El primer ingreso efectivo fija el campo
+`reglas_bloqueadas` y un intento posterior de cambiar las reglas devuelve 409.
+El dueño puede ajustar los cupos a partir de la ocupación confirmada. Si hay
+una incorporación en curso o la ocupación sigue sin conciliar, el cambio de
+capacidad devuelve 409. Convivencia adopta la nueva capacidad al validar la
+siguiente reserva. Precio CLP entero entre
 0 y 999999999999, tanto en BD `bigint` como en JSON. Fracciones y valores fuera
 del rango se rechazan antes de persistir. No se aceptan URLs de fotos nuevas.
 
@@ -87,6 +125,12 @@ Aplicar como migrador, sobre una copia revisada de B03 y en este orden:
 3. `003_catalogo_cut.up.sql`: catálogo CUT nacional de
    [SUBDERE, versión 2018](https://www.subdere.gov.cl/sites/default/files/documentos/CUT_2018_v04.xls),
    con hash de fuente en el SQL: 16 regiones, 346 comunas y 32 de La Araucanía.
+4. `004_acceptance_operations.sql`: operaciones y reservas de incorporación.
+5. `005_postulation_lifecycle.sql`: historial, reglas congeladas y estado de finalización.
+
+Aplicar también `004_capacidad_y_estado_arriendo.up.sql` en Convivencia tras
+sus migraciones anteriores. La prueba local con cuatro procesos HTTP y
+PostgreSQL descartable se ejecuta con `python tests/integration/run_c03.py --c04`.
 
 La primera migración aborta y muestra IDs con precios fraccionarios/fuera de rango;
 no redondea. Los avisos heredados conservan IDs, URLs y datos; ubicación y ocupación
