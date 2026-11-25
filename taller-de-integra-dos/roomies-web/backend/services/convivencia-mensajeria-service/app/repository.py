@@ -9,6 +9,9 @@ from backend.service_runtime.settings import database_url
 from app.models import ServiceError
 
 
+TASK_FIELDS = "id_tarea,id_arriendo,titulo,descripcion,id_asignado,estado,id_creador,creada_en"
+
+
 class PostgresRepository:
     def __init__(self, connection_factory=None):
         self.connection_factory = connection_factory
@@ -52,6 +55,65 @@ class PostgresRepository:
             if row is None:
                 raise ServiceError("RENTAL_NOT_FOUND", "Arriendo no encontrado.", 404)
         return self.get(row["id_arriendo"], user_id)
+
+    def lock_rental(self, connection, rental_id, *, write):
+        # La baja de pertenencia usa el mismo bloqueo antes de desasignar.
+        lock = "FOR UPDATE" if write else "FOR SHARE"
+        return connection.execute(
+            f"SELECT estado FROM convivencia_mensajeria.arriendo WHERE id_arriendo=%s {lock}",
+            (rental_id,),
+        ).fetchone()
+
+    def active_member(self, connection, rental_id, user_id):
+        return connection.execute(
+            """SELECT 1 FROM convivencia_mensajeria.pertenencia
+            WHERE id_arriendo=%s AND id_usuario=%s AND estado='Activa'""",
+            (rental_id, user_id),
+        ).fetchone() is not None
+
+    def task_page(self, connection, rental_id, status, assignee, limit, before):
+        date, task_id = before or (None, None)
+        return connection.execute(
+            f"""SELECT {TASK_FIELDS} FROM convivencia_mensajeria.tarea
+            WHERE id_arriendo=%s
+              AND (%s::text IS NULL OR estado=%s)
+              AND (%s::bigint IS NULL OR id_asignado=%s)
+              AND (%s::timestamptz IS NULL OR (creada_en,id_tarea)<(%s,%s))
+            ORDER BY creada_en DESC,id_tarea DESC LIMIT %s""",
+            (rental_id, status, status, assignee, assignee, date, date, task_id, limit),
+        ).fetchall()
+
+    def insert_task(self, connection, rental_id, actor_id, data):
+        return connection.execute(
+            f"""INSERT INTO convivencia_mensajeria.tarea(id_arriendo,id_creador,titulo,descripcion,id_asignado)
+            VALUES(%s,%s,%s,%s,%s) RETURNING {TASK_FIELDS}""",
+            (rental_id, actor_id, data.titulo, data.descripcion, data.id_asignado),
+        ).fetchone()
+
+    def task_rental(self, connection, task_id):
+        row = connection.execute(
+            "SELECT id_arriendo FROM convivencia_mensajeria.tarea WHERE id_tarea=%s",
+            (task_id,),
+        ).fetchone()
+        return row["id_arriendo"] if row else None
+
+    def task(self, connection, task_id):
+        return connection.execute(
+            f"SELECT {TASK_FIELDS} FROM convivencia_mensajeria.tarea WHERE id_tarea=%s",
+            (task_id,),
+        ).fetchone()
+
+    def assign_task(self, connection, task_id, assignee):
+        return connection.execute(
+            f"UPDATE convivencia_mensajeria.tarea SET id_asignado=%s WHERE id_tarea=%s RETURNING {TASK_FIELDS}",
+            (assignee, task_id),
+        ).fetchone()
+
+    def complete_task(self, connection, task_id):
+        return connection.execute(
+            f"UPDATE convivencia_mensajeria.tarea SET estado='Completada' WHERE id_tarea=%s RETURNING {TASK_FIELDS}",
+            (task_id,),
+        ).fetchone()
 
     def occupancy(self, publication_id):
         with self.transaction() as c:

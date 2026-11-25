@@ -14,7 +14,10 @@ from backend.service_runtime.contracts import DependencyUnavailable
 from backend.service_runtime.http import configure
 from backend.service_runtime.security import confirmed_actor
 from backend.service_runtime.reporting_security import verify_report_service
-from app.models import ErrorResponse, Incorporation, Occupancy, Receipt, Rental, ServiceError, unavailable
+from app.models import (
+    ErrorResponse, Incorporation, Occupancy, Receipt, Rental, ServiceError,
+    Task, TaskAssignment, TaskCompletion, TaskCreate, TaskPage, TaskStatus, unavailable,
+)
 from app.ports import HttpIdentity, HttpPublications
 from app.repository import PostgresRepository
 from app.service import Convivencia
@@ -111,6 +114,45 @@ def create_app(instance=None, run_recovery=True):
     @application.get("/api/arriendos/{id}", response_model=Rental, responses=errors)
     def detail(id: Annotated[int, Path(gt=0, le=9223372036854775807)], identity=Depends(confirmed_actor), application_service=Depends(service)):
         return application_service.repository.get(id, identity.user_id)
+
+    @application.get("/api/arriendos/{id}/tareas", response_model=TaskPage, responses=errors)
+    def list_tasks(
+        id: Annotated[int, Path(gt=0, le=9223372036854775807)],
+        estado: TaskStatus | None = None,
+        id_asignado: Annotated[int | None, Query(gt=0, le=9223372036854775807)] = None,
+        limite: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+        identity=Depends(confirmed_actor),
+        application_service=Depends(service),
+    ):
+        return application_service.tasks.list(id, identity.user_id, estado, id_asignado, limite, cursor)
+
+    @application.post("/api/arriendos/{id}/tareas", status_code=201, response_model=Task, responses=errors)
+    def create_task(
+        id: Annotated[int, Path(gt=0, le=9223372036854775807)],
+        data: TaskCreate,
+        identity=Depends(confirmed_actor),
+        application_service=Depends(service),
+    ):
+        return application_service.tasks.create(id, identity.user_id, data)
+
+    @application.patch("/api/tareas/{id}", response_model=Task, responses=errors)
+    def reassign_task(
+        id: Annotated[int, Path(gt=0, le=9223372036854775807)],
+        data: TaskAssignment,
+        identity=Depends(confirmed_actor),
+        application_service=Depends(service),
+    ):
+        return application_service.tasks.reassign(id, identity.user_id, data.id_asignado)
+
+    @application.patch("/api/tareas/{id}/estado", response_model=Task, responses=errors)
+    def complete_task(
+        id: Annotated[int, Path(gt=0, le=9223372036854775807)],
+        data: TaskCompletion,
+        identity=Depends(confirmed_actor),
+        application_service=Depends(service),
+    ):
+        return application_service.tasks.complete(id, identity.user_id)
 
     return application
 

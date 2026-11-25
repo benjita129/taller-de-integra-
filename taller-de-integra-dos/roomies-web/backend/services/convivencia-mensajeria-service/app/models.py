@@ -1,9 +1,11 @@
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 PositiveId = Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]
+TaskStatus = Literal["Pendiente", "Completada"]
 
 
 class Incorporation(BaseModel):
@@ -50,6 +52,39 @@ class Rental(BaseModel):
     cupos_totales: PositiveId
     version_capacidad: PositiveId
     ocupacion: Annotated[int, Field(strict=True, ge=0)]
+
+
+class TaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    titulo: Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1, pattern=r"^[^\x00]+$")]
+    descripcion: Annotated[str, StringConstraints(strict=True, pattern=r"^[^\x00]*$")] | None = None
+    id_asignado: PositiveId | None = None
+
+
+class TaskAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id_asignado: PositiveId
+
+
+class TaskCompletion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    estado: Literal["Completada"]
+
+
+class Task(BaseModel):
+    id_tarea: PositiveId
+    id_arriendo: PositiveId
+    titulo: str
+    descripcion: str | None
+    id_asignado: PositiveId | None
+    estado: TaskStatus
+    id_creador: PositiveId
+    creada_en: datetime
+
+
+class TaskPage(BaseModel):
+    items: list[Task]
+    siguiente_cursor: str | None
 
 
 class ErrorResponse(BaseModel):

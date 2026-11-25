@@ -50,3 +50,33 @@ en orden con un rol migrador y el login dedicado
 
 El health solo acredita proceso HTTP. El acta de contrato, pruebas y estado de
 firma están en `docs/contracts/incorporacion.*`.
+
+## Tareas compartidas (S3R-C05)
+
+| Operación | Entrada y permiso |
+| --- | --- |
+| `GET /api/arriendos/{id}/tareas` | Integrante activo. Filtros opcionales `estado` (`Pendiente` o `Completada`) e `id_asignado`. |
+| `POST /api/arriendos/{id}/tareas` | Integrante activo. `titulo` obligatorio, `descripcion` e `id_asignado` opcionales. Devuelve 201. |
+| `PATCH /api/tareas/{id}` | Integrante activo. Cuerpo con `id_asignado` de un integrante activo del mismo arriendo. Devuelve 409 si la tarea ya está completada. |
+| `PATCH /api/tareas/{id}/estado` | Solo el asignado activo. Cuerpo con `estado: "Completada"`. Repetir la operación devuelve la tarea completada. |
+
+Cada tarea incluye `id_tarea`, `id_arriendo`, `titulo`, `descripcion`,
+`id_asignado`, `estado`, `id_creador` y `creada_en`. El listado devuelve
+`items` y `siguiente_cursor`. Enviar el cursor con la misma cuenta, arriendo
+y filtros. `limite` acepta de 1 a 100 y vale 20 por defecto.
+
+Aplicar `005_tareas_compartidas.up.sql` y configurar en Convivencia un
+`CONVIVENCIA_CURSOR_SECRET` estable y exclusivo de al menos 32 caracteres
+ASCII sin espacios. El Gateway usa `CONVIVENCIA_UPSTREAM_URL`.
+
+La migración desasigna las pendientes en la misma transacción que cambia una
+pertenencia de `Activa` a `Inactiva`. El bloqueo del arriendo serializa ese
+cambio con las operaciones de tareas. Las completadas conservan su asignación.
+El endpoint de retiro por dueño se integra en S3R-F03 con el mismo bloqueo.
+
+El siguiente comando verifica C05 desde `roomies-web` con PostgreSQL efímero
+y dos clientes HTTP.
+
+```powershell
+python backend/services/convivencia-mensajeria-service/tests/run_isolated.py -k test_tasks
+```

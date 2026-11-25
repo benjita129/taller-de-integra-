@@ -4,11 +4,13 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from app.models import Incorporation, Reservation, ServiceError, unavailable
+from app.tasks import Tasks
 
 
 class Convivencia:
     def __init__(self, repository, identity, publications):
         self.repository, self.identity, self.publications = repository, identity, publications
+        self.tasks = Tasks(repository)
 
     def incorporate(self, key: UUID, payload: dict):
         result = self._incorporate(key, payload)

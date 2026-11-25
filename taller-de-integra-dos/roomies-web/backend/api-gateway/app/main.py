@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse
 
 from .config import Settings
+from .local_routes import dispatch
 from .proxy import forward
 
 
@@ -19,6 +20,7 @@ class RouteGuard:
         path = scope["path"]
         private = (path.rstrip("/") in {"/usuarios/me", "/api/publicaciones/mias", "/api/mis-publicaciones"}
                    or path.startswith("/api/arriendos/")
+                   or path.startswith("/api/tareas/")
                    or path.startswith("/api/postulaciones/")
                    or (path.startswith("/api/publicaciones/") and path.endswith("/detalle"))
                    or (path.startswith("/api/publicaciones") and scope["method"] != "GET"))
@@ -74,8 +76,11 @@ def create_app(settings: Settings | None = None, *, transport=None):
 
     app.add_api_route("/usuarios/me", forward, methods=["GET", "PATCH"])
     if config.local_mode:
-        from .local_routes import dispatch
         app.add_api_route("/{path:path}",dispatch,methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"])
+    else:
+        app.add_api_route("/api/arriendos/{id}/tareas", dispatch, methods=["GET", "POST", "OPTIONS"])
+        app.add_api_route("/api/tareas/{id}", dispatch, methods=["PATCH", "OPTIONS"])
+        app.add_api_route("/api/tareas/{id}/estado", dispatch, methods=["PATCH", "OPTIONS"])
     return app
 
 

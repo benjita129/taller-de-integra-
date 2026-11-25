@@ -68,3 +68,43 @@ def test_arriendos_upstream_errors_also_disable_caching(status):
                       path="/api/arriendos/mio", settings=Settings(local_mode=True, convivencia_upstream="http://convivencia.test"))
     assert result.status_code == status
     assert result.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("local_mode", [False, True])
+@pytest.mark.parametrize("method, path, query, body, status", [
+    ("GET", "/api/arriendos/7/tareas", b"estado=Pendiente&limite=2", b"", 200),
+    ("POST", "/api/arriendos/7/tareas", b"", b'{"titulo":"Limpiar"}', 201),
+    ("PATCH", "/api/tareas/9", b"", b'{"id_asignado":12}', 200),
+    ("PATCH", "/api/tareas/9/estado", b"", b'{"estado":"Completada"}', 403),
+])
+def test_tasks_route_to_convivencia_with_public_auth(local_mode, method, path, query, body, status):
+    def handler(request):
+        assert request.url.host == "convivencia.test"
+        assert request.url.path == path
+        assert request.url.query == query
+        assert request.method == method
+        assert request.content == body
+        assert request.headers["authorization"] == "Bearer synthetic"
+        assert "x-roomies-service" not in request.headers
+        return reply(status, content=b'{}', headers={"Cache-Control": "public"})
+
+    settings = Settings(local_mode=local_mode, convivencia_upstream="http://convivencia.test")
+    result = exercise(handler, method, path + ("?" + query.decode() if query else ""), settings,
+                      headers={"Authorization": "Bearer synthetic", "X-Roomies-Service": "private"},
+                      content=body)
+    assert result.status_code == status
+    assert result.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("local_mode", [False, True])
+@pytest.mark.parametrize("method, path, status", [
+    ("GET", "/api/arriendos/7/tareas", 503),
+    ("PATCH", "/api/tareas/%39/estado", 404),
+    ("PATCH", "/api/tareas/0", 404),
+    ("DELETE", "/api/tareas/9", 405),
+])
+def test_tasks_fail_closed(local_mode, method, path, status):
+    settings = Settings(local_mode=local_mode, upstream="http://auth.test")
+    result = exercise(unexpected, method, path, settings)
+    assert result.status_code == status
+    assert result.headers["cache-control"] == "no-store"
