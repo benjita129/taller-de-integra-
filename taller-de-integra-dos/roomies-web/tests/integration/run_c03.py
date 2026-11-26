@@ -1,6 +1,7 @@
 """C03: procesos HTTP reales, roles PostgreSQL propios y fallos de red controlados."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -30,36 +31,37 @@ def port():
 
 class FaultProxy:
     """Solo reenvía a un origen loopback fijo; puede retener o perder una respuesta."""
-    def __init__(self, target, selected):
-        self.target, self.selected = target, selected
-        self.mode, self.keys = "pass", []
-        self.gate, self.entered = threading.Event(), threading.Event()
+    def __init__(self, target, selected, *, drop_status=None):
+        self.target, self.selected, self.drop_status = target, selected, drop_status
+        self.mode, self.dropped_keys = "pass", []
+        self.gate = threading.Event()
         self.gate.set()
+        self.client = httpx.Client(timeout=15, trust_env=False, follow_redirects=False)
         proxy = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_GET(self): self.forward()
             def do_POST(self): self.forward()
+            def do_PATCH(self): self.forward()
             def do_PUT(self): self.forward()
             def do_DELETE(self): self.forward()
 
             def forward(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                selected = proxy.selected(self.command, self.path)
-                mode = proxy.mode if selected else "pass"
-                if selected:
-                    proxy.keys.append(self.headers.get("Idempotency-Key"))
-                    proxy.entered.set()
+                mode = proxy.mode if proxy.selected(self.command, self.path) else "pass"
                 try:
+                    if mode == "cut":
+                        self.close_connection = True
+                        return
                     if mode == "hold" and not proxy.gate.wait(20):
                         return self.reply(503, b'{}')
                     if mode == "unavailable":
                         return self.reply(503, b'{}')
                     headers = {name: self.headers[name] for name in ("Content-Type", "Authorization", "X-Roomies-Service", "Idempotency-Key") if name in self.headers}
-                    with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
-                        response = client.request(self.command, proxy.target + self.path, content=body, headers=headers)
-                    if mode == "drop" and response.status_code == 201:
+                    response = proxy.client.request(self.command, proxy.target + self.path, content=body, headers=headers)
+                    if mode == "drop" and response.is_success and proxy.drop_status in (None, response.status_code):
+                        proxy.dropped_keys.append(self.headers.get("Idempotency-Key"))
                         self.close_connection = True
                         return
                     self.reply(response.status_code, response.content, response.headers.get("Idempotency-Replayed"))
@@ -80,7 +82,6 @@ class FaultProxy:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     def set(self, mode):
-        self.entered.clear()
         self.mode = mode
         self.gate.clear() if mode == "hold" else self.gate.set()
 
@@ -93,6 +94,7 @@ class FaultProxy:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.client.close()
 
 
 def eventually(check, seconds=30):
@@ -102,6 +104,17 @@ def eventually(check, seconds=30):
         if result: return result
         time.sleep(.15)
     raise AssertionError("La operación no convergió dentro del plazo local de prueba.")
+
+
+def parallel(action, values):
+    barrier = threading.Barrier(len(values), timeout=10)
+
+    def start(value):
+        barrier.wait()
+        return action(value)
+
+    with ThreadPoolExecutor(max_workers=len(values)) as pool:
+        return list(pool.map(start, values))
 
 
 def scenarios(client, gateway, people, database, admission_proxy, callbacks, restart_listado):
@@ -159,17 +172,15 @@ def scenarios(client, gateway, people, database, admission_proxy, callbacks, res
 
     pub, _ = publication(1)
     applications = [application(pub, person) for person in (3, 4)]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(accept, applications))
+    parallel(accept, applications)
     results = [terminal(id) for id in applications]
     assert sorted(row["estado"] for row in results) == ["Aceptada", "Preseleccionada"]
     assert count(publication_id=pub) == 1
-    print("PASS dos procesos HTTP disputan el último cupo sin sobreocupación", flush=True)
+    print("PASS dos solicitudes HTTP simultáneas disputan el último cupo sin sobreocupación", flush=True)
 
     pubs = [publication(1)[0] for _ in range(2)]
     applications = [application(pub, 5) for pub in pubs]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(accept, applications))
+    parallel(accept, applications)
     assert sum(terminal(id)["estado"] == "Aceptada" for id in applications) == 1
     assert count(user=ids[5]) == 1
     eventually(lambda: database.execute("""SELECT NOT EXISTS (
@@ -227,9 +238,17 @@ def scenarios(client, gateway, people, database, admission_proxy, callbacks, res
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-bin", type=Path)
-    parser.add_argument("--web", action="store_true", help="Comprobar SCRUM-112 también con Next y BFF reales aislados")
+    web = parser.add_mutually_exclusive_group()
+    web.add_argument("--web", action="store_true", help="Comprobar SCRUM-112 también con Next y BFF reales aislados")
+    web.add_argument("--manual-web", action="store_true", help="Abrir Roomies en el navegador con cuentas de prueba locales")
     parser.add_argument("--c04", action="store_true", help="Comprobar también cierre, postulaciones y ocupación de S3R-C04")
+    parser.add_argument("--c06", action="store_true", help="Comprobar concurrencia, cortes de red y consistencia de S3R-C06")
+    parser.add_argument("--strict-c06", action="store_true", help="Salir con error si queda una dependencia de C06 sin verificar")
     args = parser.parse_args()
+    if args.strict_c06 and not args.c06:
+        parser.error("--strict-c06 requiere --c06")
+    if args.manual_web and (args.c04 or args.c06):
+        parser.error("--manual-web se ejecuta por separado")
     candidates = [args.pg_bin] if args.pg_bin else []
     found = shutil.which("initdb")
     if found: candidates.append(Path(found).parent)
@@ -253,7 +272,12 @@ def main():
     def stop(name):
         process = processes.get(name)
         if process and process.poll() is None:
-            process.terminate()
+            if os.name == "nt":
+                # El ejecutable del venv en Windows lanza un segundo proceso de Python.
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+            else:
+                process.terminate()
             process.wait(timeout=15)
 
     try:
@@ -277,17 +301,59 @@ def main():
         origins = {name: f"http://127.0.0.1:{port()}" for name in ("auth", "listado", "convivencia", "gateway")}
         admin_key = "sb_secret_disposable_c03_only_000000000000"
         internal_token = "synthetic-c03-service-key-000000000000"
-        with IdentityFixture(admin_key=admin_key) as identity, FaultProxy(origins["convivencia"], lambda method, path: path == "/internal/incorporaciones") as admission_proxy, FaultProxy(origins["listado"], lambda method, path: method in {"PUT", "DELETE"} and "/reservas/" in path) as callbacks, httpx.Client(timeout=20, trust_env=False) as client:
+        with ExitStack() as stack:
+            identity = stack.enter_context(IdentityFixture(admin_key=admin_key))
+            admission_proxy = stack.enter_context(FaultProxy(origins["convivencia"], lambda method, path: path == "/internal/incorporaciones"))
+            callbacks = stack.enter_context(FaultProxy(
+                origins["listado"],
+                lambda method, path: method in {"PUT", "DELETE"}
+                and ("/reservas/" in path or path.endswith(("/retiros", "/ocupacion"))),
+            ))
+            client = stack.enter_context(httpx.Client(timeout=40, trust_env=False))
             allowed = [pg_port, identity.server.server_port, admission_proxy.server.server_port, callbacks.server.server_port, *[int(value.rsplit(":", 1)[1]) for value in origins.values()]]
-            common = {**clean, "ROOMIES_LOCAL_MODE": "1", "ROOMIES_RUNTIME_MODE": "disposable", "ROOMIES_PERSISTENCE_LAYOUT": "private-v1", "ROOMIES_TEST_RUNNER": "disposable-only", "ROOMIES_ALLOWED_PORTS": json.dumps(allowed), "ROOMIES_AUTH_PROVIDER_URL": identity.origin, "ROOMIES_AUTH_PUBLISHABLE_KEY": identity.publishable_key, "ROOMIES_INTERNAL_TOKEN": internal_token, "ROOMIES_CURSOR_SECRET": "synthetic-c03-cursor-key-000000000000", "AUTH_USERS_UPSTREAM_URL": origins["auth"], "LISTADO_UPSTREAM_URL": origins["listado"], "CONVIVENCIA_UPSTREAM_URL": admission_proxy.origin}
+            convivencia_to_listado = callbacks.origin
+            convivencia_to_auth = origins["auth"]
+            if args.c06:
+                eligibility = stack.enter_context(FaultProxy(
+                    origins["auth"], lambda method, path: path.endswith("/habilitacion"),
+                ))
+                reservations = stack.enter_context(FaultProxy(
+                    callbacks.origin, lambda method, path: method == "POST" and path.endswith("/reservas"),
+                ))
+                decision = stack.enter_context(FaultProxy(
+                    origins["gateway"], lambda method, path: method == "PATCH" and path.endswith("/estado"),
+                    drop_status=200,
+                ))
+                convivencia_to_listado = reservations.origin
+                convivencia_to_auth = eligibility.origin
+                allowed.extend((reservations.server.server_port, eligibility.server.server_port))
+            common = {
+                **clean,
+                "ROOMIES_LOCAL_MODE": "1",
+                "ROOMIES_RUNTIME_MODE": "disposable",
+                "ROOMIES_PERSISTENCE_LAYOUT": "private-v1",
+                "ROOMIES_TEST_RUNNER": "disposable-only",
+                "ROOMIES_ALLOWED_PORTS": json.dumps(allowed),
+                "ROOMIES_AUTH_PROVIDER_URL": identity.origin,
+                "ROOMIES_AUTH_PUBLISHABLE_KEY": identity.publishable_key,
+                "ROOMIES_INTERNAL_TOKEN": internal_token,
+                "ROOMIES_CURSOR_SECRET": "synthetic-c03-cursor-key-000000000000",
+                "CONVIVENCIA_CURSOR_SECRET": "synthetic-c06-task-cursor-key-000000000000",
+                "AUTH_USERS_UPSTREAM_URL": origins["auth"],
+                "LISTADO_UPSTREAM_URL": origins["listado"],
+                "CONVIVENCIA_UPSTREAM_URL": admission_proxy.origin,
+            }
             roles = {"auth": "sql_auth_users", "listado": "sql_listado_applications", "convivencia": "sql_convivencia_mensajeria"}
             variables = {"auth": "AUTH_USERS_DATABASE_URL", "listado": "LISTADO_DATABASE_URL", "convivencia": "CONVIVENCIA_DATABASE_URL"}
 
             def start(name):
                 env = {**common, "ROOMIES_PORT": origins[name].rsplit(":", 1)[1]}
                 if name == "auth": env["ROOMIES_SUPABASE_AUTH_ADMIN_KEY"] = admin_key
+                # Las pausas deliberadas deben agotar primero el plazo entre servicios.
+                if name == "gateway": env.update(GATEWAY_READ_TIMEOUT="25", GATEWAY_TOTAL_TIMEOUT="30")
                 if name in roles: env[variables[name]] = f"postgresql://{roles[name]}@127.0.0.1:{pg_port}/roomies_sprint2_disposable"
-                if name == "convivencia": env["LISTADO_UPSTREAM_URL"] = callbacks.origin
+                if name == "convivencia":
+                    env.update(LISTADO_UPSTREAM_URL=convivencia_to_listado, AUTH_USERS_UPSTREAM_URL=convivencia_to_auth)
                 log = (temporary / f"{name}.log").open("ab")
                 logs.append(log)
                 process = subprocess.Popen([sys.executable, "-I", "-B", str(ROOT / "backend/local_stack/serve.py"), name], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags)
@@ -302,7 +368,8 @@ def main():
 
             for name in ("auth", "listado", "convivencia", "gateway"): start(name)
             people = []
-            for index in range(21 if args.c04 else 14 if args.web else 11):
+            baseline_count = 2 if args.manual_web else 21 if args.c04 else 14 if args.web else 11
+            for index in range(baseline_count + (6 if args.c06 else 0)):
                 email = f"c03-{index}@example.com"
                 response = client.post(identity.origin + "/auth/v1/signup", headers={"apikey": identity.publishable_key}, json={"email": email, "password": "Synthetic-password-123", "data": {"nombre": f"Prueba {index}", "fecha_nacimiento": "2000-01-01"}})
                 assert response.status_code == 200
@@ -311,17 +378,38 @@ def main():
                 assert response.status_code == 200, response.text[:200]
                 person["business_id"] = response.json()["id_usuario"]
                 people.append(person)
+            pending = []
             with psycopg.connect(admin, autocommit=True) as database:
-                scenarios(client, origins["gateway"], people, database, admission_proxy, callbacks, lambda: (stop("listado"), start("listado")))
-                if args.c04:
+                if args.manual_web:
                     sys.path.insert(0, str(Path(__file__).resolve().parent))
+                    from web112 import exercise
+                    exercise(ROOT, clean, identity, origins["gateway"], database, people, port(), manual=True)
+                    return
+                scenarios(client, origins["gateway"], people, database, admission_proxy, callbacks, lambda: (stop("listado"), start("listado")))
+                if args.c04 or args.c06:
+                    sys.path.insert(0, str(Path(__file__).resolve().parent))
+                if args.c04:
                     from c04 import exercise
-                    exercise(client, origins, people[14:], database, admission_proxy, callbacks, internal_token, eventually)
+                    exercise(client, origins, people[14:21], database, admission_proxy, callbacks, internal_token, eventually)
+                if args.c06:
+                    from c06 import exercise as recover_c06
+                    from c06_membership import exercise as exercise_membership
+                    version = database.execute("SHOW server_version").fetchone()[0]
+                    print(f"C06 entorno: PostgreSQL {version}, Python {sys.version.split()[0]}, cuatro procesos HTTP locales", flush=True)
+                    recover_c06(
+                        client, origins, people[baseline_count:baseline_count + 2], database,
+                        admission_proxy, eligibility, reservations, callbacks, decision, internal_token, eventually,
+                    )
+                    pending = exercise_membership(client, origins, people[baseline_count + 2:], database, eventually, callbacks=callbacks)
+                    for item in pending:
+                        print(f"PENDIENTE C06: {item}", flush=True)
                 if args.web:
                     sys.path.insert(0,str(Path(__file__).resolve().parent))
                     from web112 import exercise
                     exercise(ROOT,clean,identity,origins["gateway"],database,people,port())
             print("PASS C03: cuatro procesos separados y SQL real; Auth externo simulado explícitamente", flush=True)
+            if pending and args.strict_c06:
+                raise SystemExit(2)
     finally:
         for name in reversed(list(processes)): stop(name)
         for log in logs: log.close()

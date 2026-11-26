@@ -4,18 +4,22 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from uuid import uuid4
 import httpx
 
 
-def exercise(root, clean, identity, gateway, database, people, port):
+def exercise(root, clean, identity, gateway, database, people, port, *, manual=False):
     project = root / "frontend-next"
-    isolated = Path(tempfile.mkdtemp(prefix=".proxy-test-112-", dir=project))
     node = shutil.which("node")
     if node is None:
-        raise AssertionError("Falta Node para comprobar Next/BFF reales.")
+        raise RuntimeError("Falta Node en PATH para iniciar Next.js.")
+    next_cli = project / "node_modules/next/dist/bin/next"
+    if not next_cli.is_file():
+        raise RuntimeError("Faltan las dependencias de Next.js. Ejecuta npm ci en frontend-next.")
+    isolated = Path(tempfile.mkdtemp(prefix=".proxy-test-112-", dir=project))
     linked = False
     process = None
     try:
@@ -30,27 +34,55 @@ def exercise(root, clean, identity, gateway, database, people, port):
                "ROOMIES_RUNTIME_MODE":"disposable", "WEB_AUTH_ENABLED":"true", "WEB_AUTH_PROVIDER":"supabase",
                "WEB_AUTH_ORIGIN":base, "WEB_AUTH_FASTAPI_ORIGIN":gateway, "FASTAPI_ORIGIN":gateway,
                "WEB_SUPABASE_ORIGIN":identity.origin, "WEB_SUPABASE_PUBLISHABLE_KEY":identity.publishable_key}
-        with (isolated / "next.log").open("wb") as log, ExitStack() as clients:
-            process = subprocess.Popen([node, str(project / "node_modules/next/dist/bin/next"), "dev", "--hostname", "127.0.0.1", "--port", str(port)], cwd=isolated, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
-            owner, applicant, stranger = [clients.enter_context(httpx.Client(base_url=base,timeout=30,trust_env=False,headers={"Origin":base,"X-Haycupo-CSRF":"1"})) for _ in range(3)]
-            for _ in range(100):
-                if process.poll() is not None: raise AssertionError("No arrancó Next aislado: "+(isolated/"next.log").read_text(errors="replace")[-2000:])
+        log_path = isolated / "next.log"
+        with log_path.open("wb") as log, ExitStack() as clients:
+            command = [node, str(next_cli), "dev", "--hostname", "127.0.0.1", "--port", str(port)]
+            if manual:
+                command.append("--webpack")
+            process = subprocess.Popen(command, cwd=isolated, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            sessions = [clients.enter_context(httpx.Client(
+                base_url=base, timeout=30, trust_env=False, headers={"Origin": base, "X-Haycupo-CSRF": "1"},
+            )) for _ in range(2 if manual else 3)]
+            owner, applicant = sessions[:2]
+            deadline = time.monotonic() + 90
+            while process.poll() is None and time.monotonic() < deadline:
                 try:
-                    if owner.get("/").status_code == 200: break
-                except httpx.HTTPError: pass
+                    if owner.get("/", timeout=5).status_code == 200:
+                        break
+                except httpx.HTTPError:
+                    pass
                 time.sleep(.3)
-            else: raise AssertionError("Next no estuvo listo a tiempo.")
+            else:
+                raise RuntimeError("Next.js no quedó disponible.\n" + log_path.read_text(encoding="utf-8", errors="replace")[-2500:])
 
             def request(client,method,path,expected=(200,),**kwargs):
                 response=client.request(method,path,**kwargs)
                 assert response.status_code in expected,(method,path,response.status_code)
                 return response
 
-            for client,index in zip((owner,applicant,stranger),(11,12,13)):
-                request(client,"POST","/web-api/auth/login",json={"correo":f"c03-{index}@example.com","contrasena":"Synthetic-password-123"})
+            accounts = [f"c03-{index}@example.com" for index in (range(2) if manual else range(11, 14))]
+            password = "Synthetic-password-123"
+            for client, email in zip(sessions, accounts):
+                request(client,"POST","/web-api/auth/login",json={"correo":email,"contrasena":password})
                 assert request(client,"GET","/web-api/auth/sesion").json()["authenticated"] is True
-            form={"titulo":"Arriendo D02 integrado","descripcion":"Prueba local con SQL efímero","ubicacion":"Temuco","precio":"150000","cupos_totales":"1","tipo":"Arrendador","categoria":"ofrezco","tipo_vivienda":"habitacion","mascota":"no","id_region":"9","id_comuna":"9101"}
+            title = "Habitación de prueba en Temuco" if manual else "Arriendo D02 integrado"
+            form={"titulo":title,"descripcion":"Prueba local con SQL efímero","ubicacion":"Temuco","precio":"150000","cupos_totales":"1","tipo":"Arrendador","categoria":"ofrezco","tipo_vivienda":"habitacion","mascota":"no","id_region":"9","id_comuna":"9101"}
             publication=request(owner,"POST","/web-api/publicaciones",(201,),files=[(k,(None,v)) for k,v in form.items()],headers={"Idempotency-Key":str(uuid4())}).json()["id_publicacion"]
+            if manual:
+                print(f"MANUAL_URL={base}/", flush=True)
+                print(f"Aviso de prueba: {base}/publicaciones/{publication}", flush=True)
+                print(f"Arrendador: {accounts[0]} | Postulante: {accounts[1]}", flush=True)
+                print(f"Contraseña ficticia para ambas cuentas: {password}", flush=True)
+                print("Para detener el entorno, escribe salir o presiona Ctrl+C.", flush=True)
+                try:
+                    for command in sys.stdin:
+                        if command.strip().lower() == "salir":
+                            break
+                except KeyboardInterrupt:
+                    pass
+                return
+            stranger = sessions[2]
             withdrawn=request(applicant,"POST","/web-api/postulaciones",(201,),json={"publicacion":publication}).json()["id_postulacion"]
             for _ in range(2):
                 cancelled=request(applicant,"POST","/web-api/postulaciones",json={"retiro":withdrawn}).json()
